@@ -1,0 +1,273 @@
+/*
+ * SoloX UI Optimization - Modern Design System
+ * Version: 2.10.0
+ * Features: Modern color palette, better typography, smooth animations
+ */
+
+/* CSS Custom Properties - Design Tokens */
+:root {
+    /* Primary Colors - Modern Teal/Cyan */
+    --solox-primary: #06b6d4;
+    --solox-primary-dark: #0891b2;
+    --solox-primary-light: #22d3ee;
+    
+    /* Secondary Colors - Purple accent */
+    --solox-secondary: #8b5cf6;
+    --solox-secondary-dark: #7c3aed;
+    
+    /* Semantic Colors */
+    --solox-success: #10b981;
+    --solox-warning: #f59e0b;
+    --solox-danger: #ef4444;
+    --solox-info: #3b82f6;
+    
+    /* Neutral Colors */
+    --solox-gray-50: #f8fafc;
+    --solox-gray-100: #f1f5f9;
+    --solox-gray-200: #e2e8f0;
+    --solox-gray-300: #cbd5e1;
+    --solox-gray-400: #94a3b8;
+    --solox-gray-500: #64748b;
+    --solox-gray-600: #475569;
+    --solox-gray-700: #334155;
+    --solox-gray-800: #1e293b;
+    --solox-gray-900: #0f172a;
+    
+    /* Background */
+    --solox-bg-primary: #ffffff;
+    --solox-bg-secondary: #f8fafc;
+    --solox-bg-card: #ffffff;
+    
+    /* Shadows - Modern soft shadows */
+    --solox-shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    --solox-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
+    --solox-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+    --solox-shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+    --solox-shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+    
+    /* Border Radius */
+    --solox-radius-sm: 0.375rem;
+    --solox-radius: 0.5rem;
+    --solox-radius-md: 0.75rem;
+    --solox-radius-lg: 1rem;
+    --solox-radius-xl: 1.5rem;
+    --solox-radius-full: 9999px;
+    
+    /* Transitions */
+    --solox-transition-fast: 150ms ease;
+    --solox-transition: 200ms ease;
+    --solox-transition-slow: 300ms ease;
+}
+
+/* Base Typography */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Modern Card Styling */
+.card {
+    border: 1px solid var(--solox-gray-200);
+    border-radius: var(--solox-radius-lg);
+    box-shadow: var(--solox-shadow-sm);
+    transition: box-shadow var(--solox-transition), transform var(--solox-transition);
+}
+
+.card:hover {
+    box-shadow: var(--solox-shadow-md);
+}
+
+.card-sm {
+    padding: 0.5rem;
+}
+
+/* Modern Button Styling */
+.btn {
+    border-radius: var(--solox-radius);
+    font-weight: 500;
+    padding: 0.5rem 1rem;
+    transition: all var(--solox-transition);
+}
+
+.btn-primary {
+    background-color: var(--solox-primary);
+    border-color: var(--solox-primary);
+}
+
+.btn-primary:hover {
+    background-color: var(--solox-primary-dark);
+    border-color: var(--solox-primary-dark);
+    transform: translateY(-1px);
+    box-shadow: var(--solox-shadow-md);
+}
+
+.btn-default {
+    background-color: var(--solox-gray-100);
+    border: 1px solid var(--solox-gray-200);
+    color: var(--solox-gray-700);
+}
+
+.btn-default:hover {
+    background-color: var(--solox-gray-200);
+    border-color: var(--solox-gray-300);
+    color: var(--solox-gray-800);
+}
+
+/* Modern Badge/Avatar */
+.avatar {
+    border-radius: var(--solox-radius-md);
+    font-weight: 600;
+}
+
+/* Navbar Improvements */
+.navbar {
+    background: linear-gradient(135deg, var(--solox-gray-900) 0%, var(--solox-gray-800) 100%);
+    backdrop-filter: blur(10px);
+}
+
+.navbar-brand-image {
+    border-radius: var(--solox-radius);
+}
+
+/* Status Indicators - Modern Pulsing Dot */
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-dot-animated {
+    animation: solox-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes solox-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* Page Improvements */
+.page {
+    background-color: var(--solox-bg-secondary);
+}
+
+.page-wrapper {
+    background-color: transparent;
+}
+
+.page-header {
+    padding: 1.5rem 0;
+}
+
+/* Modern Metric Cards */
+.col-sm-6.col-lg-2 .card {
+    background: linear-gradient(135deg, var(--solox-bg-card) 0%, var(--solox-gray-50) 100%);
+}
+
+.col-sm-6.col-lg-2 .card .font-weight-medium {
+    font-size: 0.875rem;
+    color: var(--solox-gray-600);
+}
+
+.col-sm-6.col-lg-2 .card .text-muted {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--solox-gray-900);
+}
+
+/* Chart Container */
+.apexcharts-canvas {
+    border-radius: var(--solox-radius-md);
+    background: var(--solox-bg-card);
+    padding: 1rem;
+}
+
+/* Table Improvements */
+.table {
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.table thead th {
+    background-color: var(--solox-gray-50);
+    border-bottom: 2px solid var(--solox-gray-200);
+    font-weight: 600;
+    color: var(--solox-gray-700);
+    padding: 0.75rem 1rem;
+}
+
+.table tbody tr:hover {
+    background-color: var(--solox-gray-50);
+}
+
+/* Form Controls */
+.form-control {
+    border-radius: var(--solox-radius);
+    border: 1px solid var(--solox-gray-300);
+    padding: 0.5rem 0.75rem;
+    transition: border-color var(--solox-transition), box-shadow var(--solox-transition);
+}
+
+.form-control:focus {
+    border-color: var(--solox-primary);
+    box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.1);
+}
+
+/* Modal Improvements */
+.modal-content {
+    border-radius: var(--solox-radius-lg);
+    border: none;
+    box-shadow: var(--solox-shadow-xl);
+}
+
+.modal-header {
+    border-bottom: 1px solid var(--solox-gray-200);
+    padding: 1.25rem 1.5rem;
+}
+
+.modal-body {
+    padding: 1.5rem;
+}
+
+/* Footer */
+.footer {
+    background-color: var(--solox-bg-card);
+    border-top: 1px solid var(--solox-gray-200);
+    padding: 1.5rem 0;
+}
+
+/* Icon Styling */
+.icon {
+    transition: transform var(--solox-transition);
+}
+
+.icon:hover {
+    transform: scale(1.1);
+}
+
+/* Responsive Improvements */
+@media (max-width: 768px) {
+    .col-sm-6.col-lg-2 {
+        margin-bottom: 0.75rem;
+    }
+    
+    .btn {
+        padding: 0.4rem 0.75rem;
+        font-size: 0.875rem;
+    }
+}
+
+/* Loading States */
+.skeleton {
+    background: linear-gradient(90deg, var(--solox-gray-100) 25%, var(--solox-gray-200) 50%, var(--solox-gray-100) 75%);
+    background-size: 200% 100%;
+    animation: skeleton-loading 1.5s infinite;
+}
+
+@keyframes skeleton-loading {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
