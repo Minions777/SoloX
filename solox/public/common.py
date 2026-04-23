@@ -16,8 +16,14 @@ import signal
 import cv2
 from functools import wraps
 from jinja2 import Environment, FileSystemLoader
-from tidevice._device import Device
-from tidevice import Usbmux
+# py-ios-device: supports iOS 17+ (replacement for tidevice)
+try:
+    from py_ios_device.ios_device import Device
+    from py_ios_device.usbmux import Usbmux
+except ImportError:
+    # Fallback for backward compatibility
+    from tidevice._device import Device
+    from tidevice import Usbmux
 from solox.public.adb import adb
 
 

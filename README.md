@@ -28,7 +28,7 @@ Quickly locate and analyze performance issues to improve application performance
 - Install Python 3.10 + [**Download**](https://www.python.org/downloads/)
 - Install adb and configure environment variables (SoloX's  adb may not necessarily fit your computer) [**Download**](https://developer.android.com/studio/releases/platform-tools)
 
-💡 If Windows users need to test ios, install and start Itunes. [**Documentation**](https://github.com/alibaba/taobao-iphone-device)  (Not support iOS17)
+💡 If Windows users need to test iOS, install and start iTunes. [**Documentation**](https://github.com/alibaba/taobao-iphone-device)  (iOS 17+ requires py-ios-device)
 
 ## 📥Installation
 

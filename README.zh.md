@@ -27,7 +27,7 @@ SoloX是一个可以实时收集Android/iOS性能数据的web工具。
 - 安装 Python 3.10 + [**Download**](https://www.python.org/downloads/)
 - 安装 adb和配置好环境变量 (SoloX自带的adb不一定适配你的电脑，建议自己安装) [**Download**](https://developer.android.com/studio/releases/platform-tools)
 
-💡 如果Windows用户需要测试iOS，请先安装Itunes. [**参考**](https://github.com/alibaba/taobao-iphone-device)  （不支持iOS17）
+💡 如果Windows用户需要测试iOS，请先安装iTunes。 [**参考**](https://github.com/alibaba/taobao-iphone-device)  （iOS 17+ 需要使用 py-ios-device）
 
 ## 📥安装
 
