@@ -4,7 +4,13 @@ import time
 import os
 import json
 from logzero import logger
-import tidevice
+# py-ios-device: supports iOS 17+ (replacement for tidevice)
+try:
+    from py_ios_device.ios_device import IOSDevice
+except ImportError:
+    # Fallback for backward compatibility
+    import tidevice
+    IOSDevice = tidevice.Device
 import multiprocessing
 import solox.public._iosPerf as iosP
 from solox.public.iosperf._perf import DataType, Performance
@@ -304,7 +310,7 @@ class Battery(object):
 
     def getiOSBattery(self, noLog=False):
         """Get ios battery info, unit:%"""
-        d  = tidevice.Device(udid=self.deviceId)
+        d  = IOSDevice(udid=self.deviceId)
         ioDict =  d.get_io_power()
         tem = m._setValue(ioDict['Diagnostics']['IORegistry']['Temperature'] / 100)
         current = m._setValue(abs(ioDict['Diagnostics']['IORegistry']['InstantAmperage']))
@@ -517,7 +523,7 @@ class Disk(object):
         return disk_dict
 
     def getiOSDisk(self):
-        ios_device = tidevice.Device(udid=self.deviceId)
+        ios_device = IOSDevice(udid=self.deviceId)
         disk_dict  = ios_device.storage_info()
         return disk_dict
     
@@ -612,13 +618,13 @@ class iosPerformance(object):
 
     def getPerformance(self, perfTpe: DataType):
         if perfTpe == DataType.NETWORK:
-            perf = Performance(tidevice.Device(udid=self.deviceId), [perfTpe])
+            perf = Performance(IOSDevice(udid=self.deviceId), [perfTpe])
             perf.start(self.pkgName, callback=self.callback)
             time.sleep(3)
             perf.stop()
             perf_value = self.downflow, self.upflow
         else:
-            perf = iosP.Performance(tidevice.Device(udid=self.deviceId), [perfTpe])
+            perf = iosP.Performance(IOSDevice(udid=self.deviceId), [perfTpe])
             perf_value = perf.start(self.pkgName, callback=self.callback)
         return perf_value
 

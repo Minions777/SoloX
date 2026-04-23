@@ -87,7 +87,23 @@ class Devices:
     def getSdkVersion(self, deviceId):
         version = adb.shell(cmd='getprop ro.build.version.sdk', deviceId=deviceId)
         return version
-    
+
+    def getSdkVersionInt(self, deviceId) -> int:
+        """Return integer SDK version, default 0 if parsing fails"""
+        version = self.getSdkVersion(deviceId)
+        try:
+            return int(version.strip())
+        except (ValueError, AttributeError):
+            return 0
+
+    def isAndroidVersionAbove(self, deviceId, version: int) -> bool:
+        """Check if Android version is >= specified version"""
+        return self.getSdkVersionInt(deviceId) >= version
+
+    def getAndroidVersionRelease(self, deviceId) -> str:
+        """Return Android version release string (e.g., '14', '15')"""
+        return adb.shell(cmd='getprop ro.build.version.release', deviceId=deviceId).strip()
+
     def getCpuCores(self, deviceId):
         """get Android cpu cores"""
         cmd = 'cat /sys/devices/system/cpu/online'

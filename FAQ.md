@@ -109,5 +109,7 @@
 
 ## 2️⃣0️⃣ Android/iOS最高支持的系统版本？
 
-- Android: 6.0+
-- iOS: 12.0+
+- Android: 6.0+ (已测试至 Android 15)
+- iOS: 12.0+ (py-ios-device 支持 iOS 17+)
+
+**注意**: iOS 17+ 需要使用 `py-ios-device>=1.0.0` 替代 `tidevice`
