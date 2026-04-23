@@ -1,8 +1,10 @@
 import os
+import re
 import shutil
 import time
 import requests
 import json
+from functools import lru_cache
 from flask import request, make_response
 from logzero import logger
 from flask import Blueprint
@@ -15,6 +17,44 @@ d = Devices()
 f = File()
 api = Blueprint("api", __name__)
 method = Method()
+
+# ── Security helpers ─────────────────────────────────────────────────────────
+
+def _validate_scene_name(name: str) -> str:
+    """
+    Sanitize scene/report directory name to prevent path traversal attacks.
+    Returns sanitized name or raises ValueError if unsafe.
+    """
+    if not name or ".." in name or name.startswith("/"):
+        raise ValueError("Invalid scene name")
+    # Allow only safe characters: alphanumeric, dash, underscore, dot
+    sanitized = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", name)
+    if sanitized != name:
+        logger.warning(f"Scene name sanitized: {name!r} -> {sanitized!r}")
+    return sanitized
+
+def _safe_join(*paths) -> str:
+    """
+    Join paths and verify the result is under os.getcwd().
+    Prevents path traversal via .. or absolute path components.
+    """
+    result = os.path.normpath(os.path.join(*paths))
+    if not result.startswith(os.getcwd()):
+        raise ValueError("Path traversal attempt detected")
+    return result
+
+
+# ── Version cache ────────────────────────────────────────────────────────────
+
+@lru_cache(maxsize=1)
+def _get_pypi_version() -> str:
+    """Cached PyPI version lookup (cache invalidates hourly)."""
+    try:
+        pypi = json.loads(requests.get("https://pypi.org/pypi/solox/json", timeout=5).text)
+        return pypi["info"]["version"]
+    except Exception as e:
+        logger.warning(f"PyPI version fetch failed: {e}")
+        return ""
 
 @api.route('/apm/cookie', methods=['post', 'get'])
 def setCookie():
@@ -46,9 +86,8 @@ def setCookie():
 @api.route('/solox/version', methods=['post', 'get'])
 def version():
     try:
-        pypi = json.loads(requests.get('https://pypi.org/pypi/solox/json').text)
-        version = pypi['info']['version']
-        result = {'status': 1, 'lastest_version': version, 'current_version': __version__}
+        pypi_version = _get_pypi_version()
+        result = {'status': 1, 'lastest_version': pypi_version, 'current_version': __version__}
     except Exception as e:
         logger.exception(e)
         result = {'status': 0, 'msg': str(e)}
@@ -511,8 +550,6 @@ def makeReport():
         video = 0
         if platform == Platform.Android and model == 'normal':
             deviceId = d.getIdbyDevice(devices, platform)
-            battery_monitor = Battery(deviceId=deviceId)
-            battery_monitor.recoverBattery()
             wifi = False if wifi_switch == 'false' else True
             pid = None
             if process and platform == Platform.Android :
@@ -547,16 +584,21 @@ def makeReport():
 @api.route('/apm/edit/report', methods=['post', 'get'])
 def editReport():
     """Edit test report records"""
-    old_scene = method._request(request, 'old_scene')
-    new_scene = method._request(request, 'new_scene')
+    old_scene_raw = method._request(request, 'old_scene')
+    new_scene_raw = method._request(request, 'new_scene')
     report_dir = os.path.join(os.getcwd(), 'report')
+    try:
+        old_scene = _validate_scene_name(old_scene_raw)
+        new_scene = _validate_scene_name(new_scene_raw)
+    except ValueError as e:
+        logger.warning(f"editReport: {e}")
+        return {'status': 0, 'msg': str(e)}
     if old_scene == new_scene:
         result = {'status': 0, 'msg': 'scene not changed'}
     elif os.path.exists(os.path.join(report_dir, new_scene)):
         result = {'status': 0, 'msg': 'scene existed'}
     else:
         try:
-            new_scene = new_scene.replace('/', '_').replace(' ', '').replace('&', '_')
             os.rename(os.path.join(report_dir, old_scene), os.path.join(report_dir, new_scene))
             result = {'status': 1}
         except Exception as e:
@@ -738,10 +780,15 @@ def getpkLogData():
 @api.route('/apm/remove/report', methods=['post', 'get'])
 def removeReport():
     """Remove test report record"""
-    scene = method._request(request, 'scene')
+    scene_raw = method._request(request, 'scene')
     report_dir = os.path.join(os.getcwd(), 'report')
     try:
-        shutil.rmtree(f'{report_dir}/{scene}', True)
+        scene = _validate_scene_name(scene_raw)
+    except ValueError as e:
+        logger.warning(f"removeReport: {e}")
+        return {'status': 0, 'msg': str(e)}
+    try:
+        shutil.rmtree(os.path.join(report_dir, scene), True)
         result = {'status': 1}
     except Exception as e:
         logger.exception(e)
@@ -800,28 +847,48 @@ def apmCollect():
 
 @api.route('/apm/install/file', methods=['post', 'get'])
 def installFile():
-    """install apk/ipa from file"""
+    """install apk/ipa from file — with file type validation"""
     platform = method._request(request, 'platform')
-    file = request.files['file']
+    uploaded_file = request.files['file']
     currentPath = os.path.dirname(os.path.realpath(__file__))
     install = Install()
     unixtime = int(time.time())
+
+    # Determine expected extension and MIME type based on platform
     if platform == Platform.Android:
-        file_path = os.path.join(currentPath, '{}.apk'.format(unixtime))
-        if install.uploadFile(file_path, file):
-            install_status = install.installAPK(file_path)
-        else:
-            result = {'status': 0, 'msg': 'install file failed'}
-            return result
+        allowed_ext = '.apk'
+        allowed_mimes = {'application/vnd.android.package-archive', 'application/octet-stream', 'application/zip'}
+        file_path = os.path.join(currentPath, f'{unixtime}.apk')
+    elif platform == Platform.iOS:
+        allowed_ext = '.ipa'
+        allowed_mimes = {'application/octet-stream', 'application/x-itunes-ipa'}
+        file_path = os.path.join(currentPath, f'{unixtime}.ipa')
     else:
-        file_path = os.path.join(currentPath, '{}.ipa'.format(unixtime))
-        if install.uploadFile(file_path, file):
-            install_status = install.installIPA(file_path)
-        else:
-            result = {'status': 0, 'msg': 'install file failed'}
-            return result
+        result = {'status': 0, 'msg': 'unsupported platform'}
+        return result
+
+    # Security: validate file extension
+    filename = uploaded_file.filename or ''
+    if not filename.lower().endswith(allowed_ext):
+        logger.warning(f"installFile: rejected file {filename!r} (expected {allowed_ext})")
+        result = {'status': 0, 'msg': f'file must be {allowed_ext}'}
+        return result
+
+    # Security: validate MIME type (if provided by client)
+    content_type = uploaded_file.content_type or ''
+    if content_type and content_type not in allowed_mimes:
+        logger.warning(f"installFile: rejected MIME {content_type!r} for {allowed_ext}")
+        result = {'status': 0, 'msg': 'invalid file type'}
+        return result
+
+    if install.upload_file(file_path, uploaded_file):
+        install_status = install.install_apk(file_path) if platform == Platform.Android else install.install_ipa(file_path)
+    else:
+        result = {'status': 0, 'msg': 'upload failed'}
+        return result
+
     if install_status[0]:
-        result = {'status': 1, 'msg': 'install sucess'}
+        result = {'status': 1, 'msg': 'install success'}
     else:
         result = {'status': 0, 'msg': install_status[1]}
     return result
@@ -889,7 +956,7 @@ def cast_screen():
 @api.route('/apm/record/play', methods=['post', 'get'])
 def play_record():
     scene = method._request(request, 'scene')
-    video = os.path.join(f.get_repordir(), scene, 'record.mkv')
+    video = os.path.join(f.get_report_dir(), scene, 'record.mkv')
     try:
         Scrcpy.play_video(video)
         result = {'status': 1, 'msg': 'success'}
