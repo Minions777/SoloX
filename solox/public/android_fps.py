@@ -318,8 +318,65 @@ class SurfaceStatsCollector(object):
         sdk_version = int(adb.shell(cmd='getprop ro.build.version.sdk', deviceId=self.device))
         return sdk_version
 
+    def _get_gfxinfo_framestats_data(self):
+        """Android 12+ FPS measurement using gfxinfo framestats.
+        Returns:
+            Tuple of (refresh_period, list of [intended_vsync, vsync, frame_completed] timestamps)
+        """
+        try:
+            # Reset stats and wait for fresh data
+            adb.shell(cmd='dumpsys gfxinfo {} reset'.format(self.package_name), deviceId=self.device)
+            time.sleep(1)
+            # Get framestats data
+            results = adb.shell(cmd='dumpsys gfxinfo {} framestats'.format(self.package_name), deviceId=self.device)
+            results = results.replace("\r\n", "\n").splitlines()
+            if not results:
+                return None, None
+            
+            activity = self.focus_window
+            if activity and '#' in activity:
+                activity = activity.split('#')[0]
+            
+            is_found_window = False
+            timestamps = []
+            
+            for line in results:
+                if not is_found_window:
+                    if 'Window' in line and activity in line:
+                        is_found_window = True
+                    continue
+                if not is_found_window:
+                    continue
+                if 'PROFILEDATA' in line:
+                    continue
+                
+                fields = line.split(',')
+                if not fields or len(fields) < 14:
+                    continue
+                
+                try:
+                    # Fields: 0=INTENDED_VSYNC, 1=VSYNC, 13=FRAME_COMPLETED
+                    intended_vsync = int(fields[0])
+                    vsync = int(fields[1])
+                    frame_completed = int(fields[13])
+                    
+                    # Skip pending/invalid frames
+                    if intended_vsync == 0 or vsync == 0:
+                        continue
+                    timestamps.append([intended_vsync, vsync, frame_completed])
+                except (ValueError, IndexError):
+                    continue
+            
+            return 0.016667, timestamps  # ~60fps = 16.67ms
+            
+        except Exception as e:
+            logger.debug('gfxinfo framestats failed: {}'.format(e))
+            return None, None
+
     def _get_surfaceflinger_frame_data(self):
         """Returns collected SurfaceFlinger frame timing data.
+        Android 12+ (SDK 31+) may return empty data from --latency,
+        so we use gfxinfo framestats for Android 12+.
         return:(16.6,[[t1,t2,t3],[t4,t5,t6]])
         Returns:
             A tuple containing:
@@ -328,6 +385,11 @@ class SurfaceStatsCollector(object):
             The return value may be (None, None) if there was no data collected (for
             example, if the app was closed before the collector thread has finished).
         """
+        # Android 12+ (SDK 31+) uses different SurfaceFlinger approach
+        sdk_version = self.get_sdk_version()
+        if sdk_version >= 31:
+            # Android 12+ returns no data from --latency, use gfxinfo framestats instead
+            return self._get_gfxinfo_framestats_data()
         # shell dumpsys SurfaceFlinger --latency <window name>
         # prints some information about the last 128 frames displayed in
         # that window.
