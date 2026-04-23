@@ -1,3 +1,5 @@
+# SoloX - Real-time Performance Monitoring for Android & iOS
+
 <p align="center">
   <a>English</a> | <a href="./README.zh.md">中文</a> | <a href="./FAQ.md">FAQ</a> | <a href="https://mp.weixin.qq.com/s?__biz=MzkxMzYyNDM2NA==&mid=2247484506&idx=1&sn=b7eb6de68f84bed03001375d08e08ce9&chksm=c17b9819f60c110fd14e652c104237821b95a13da04618e98d2cf27afa798cb45e53cf50f5bd&token=1402046775&lang=zh_CN&poc_token=HKmRi2WjP7gf9CVwvLWQ2cRhrUR3wmbB9-fNZdD4" target="__blank">使用文档</a>
 </p>
@@ -8,9 +10,12 @@
 </a>
 <br>
 </p>
+
 <p align="center">
 <a href="https://pypi.org/project/solox/" target="__blank"><img src="https://img.shields.io/pypi/v/solox" alt="solox preview"></a>
 <a href="https://pepy.tech/project/solox" target="__blank"><img src="https://static.pepy.tech/personalized-badge/solox?period=total&units=international_system&left_color=grey&right_color=orange&left_text=downloads"></a>
+<a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg" alt="Black"></a>
+<a href="https://github.com/Minions777/SoloX/stargazers"><img src="https://img.shields.io/github/stars/Minions777/SoloX?style=flat-square" alt="Stars"></a>
 
 <br>
 </p>
@@ -19,156 +24,242 @@
 
 SoloX - Real-time collection tool for Android/iOS performance data.
 
-Quickly locate and analyze performance issues to improve application performance and quality. No need for ROOT/jailbreak, plug and play.
+Quickly locate and analyze performance issues to improve application performance and quality. **No ROOT/jailbreak required** - plug and play.
 
-![10 37 192 142_50003__platform=Android lan=en](https://github.com/smart-test-ti/SoloX/assets/24454096/5b33183c-dcf3-48b7-8c91-dfe20bff3d5c)
+![SoloX Preview](https://github.com/smart-test-ti/SoloX/assets/24454096/5b33183c-dcf3-48b7-8c91-dfe20bff3d5c)
 
-## 📦Requirements
+## ✨ What's New
 
-- Install Python 3.10 + [**Download**](https://www.python.org/downloads/)
-- Install adb and configure environment variables (SoloX's  adb may not necessarily fit your computer) [**Download**](https://developer.android.com/studio/releases/platform-tools)
+| Version | Features |
+|---------|----------|
+| v2.10.0 | 🌟 **Android 16 & iOS 26 Support** - Latest OS compatibility with gfxinfo framestats fallback |
+| v2.9.0 | 🎨 **Modern UI** - Redesigned interface with enhanced visual design |
+| v2.8.5 | 📊 **Python API** - Full performance monitoring API support |
+| v2.1.5 | 🔗 **Service API** - HTTP API for remote monitoring |
 
-💡 If Windows users need to test iOS, install and start iTunes. [**Documentation**](https://github.com/alibaba/taobao-iphone-device)  (iOS 17+ requires py-ios-device)
+## 📦 Requirements
 
-## 📥Installation
+| Component | Requirement |
+|------------|-------------|
+| Python | 3.10+ |
+| Android | 6.0+ (tested up to **Android 16**) |
+| iOS | py-ios-device support (**iOS 17+**), taobao-iphone-device (iOS 10-16) |
+| ADB | Required for Android (configure PATH) |
 
-### default
+### iOS Specific
+- **iOS 17+**: Requires `py-ios-device` (automatically used)
+- **iOS 10-16**: Requires iTunes on Windows, native support on macOS
 
+## 📥 Installation
+
+### Stable Release
 ```shell
-pip install -U solox    (pip install solox==version)
+pip install -U solox
 ```
 
-### mirrors
-
+### Specific Version
 ```shell
-pip install -i  https://mirrors.ustc.edu.cn/pypi/web/simple -U solox
+pip install solox==2.10.0
 ```
 
-💡 If your network is unable to download through [pip install -U solox], please try using mirrors to download, but the download of SoloX may not be the latest version.
+### China Mirror
+```shell
+pip install -i https://mirrors.ustc.edu.cn/pypi/web/simple -U solox
+```
 
-## 🚀Quickstart
+## 🚀 Quick Start
 
-### default
-
+### Basic Usage
 ```shell
 python -m solox
 ```
 
-### customize
-
+### Custom Server
 ```shell
-python -m solox --host=ip --port=port
+python -m solox --host=0.0.0.0 --port=6006
 ```
 
-## 🏴󠁣󠁩󠁣󠁭󠁿Python API
+## 🐍 Python API
 
 ```python
-# solox version : >= 2.8.5
 from solox.public.apm import AppPerformanceMonitor
 from solox.public.common import Devices
 
+# Get device process list (Android)
 d = Devices()
-processList = d.getPid(deviceId='ca6bd5a5', pkgName='com.bilibili.app.in') # for android
-print(processList) # ['{pid}:{packagename}',...]
+processList = d.getPid(deviceId='ca6bd5a5', pkgName='com.bilibili.app.in')
+print(processList)  # ['{pid}:{packagename}', ...]
 
-apm = AppPerformanceMonitor(pkgName='com.bilibili.app.in',platform='Android', deviceId='ca6bd5a5', surfaceview=True, 
-                            noLog=False, pid=None, record=False, collect_all=False, duration=0)
-# apm = AppPerformanceMonitor(pkgName='com.bilibili.app.in', platform='iOS') only supports one device
-# surfaceview： False = gfxinfo (Developer - GPU rendering mode - adb shell dumpsys gfxinfo)
-# noLog : False (Save test data to log file)
+# Initialize monitor
+apm = AppPerformanceMonitor(
+    pkgName='com.bilibili.app.in',
+    platform='Android',
+    deviceId='ca6bd5a5',
+    surfaceview=True,  # Use SurfaceFlinger (not gfxinfo)
+    noLog=False,       # Save test data to log file
+    record=False,      # Record screen during test
+    collect_all=False
+)
 
-# ************* Collect a performance parameter ************* #
-cpu = apm.collectCpu() # %
-memory = apm.collectMemory() # MB
-memory_detail = apm.collectMemoryDetail() # MB
-network = apm.collectNetwork(wifi=True) # KB
-fps = apm.collectFps() # HZ
-battery = apm.collectBattery() # level:% temperature:°C current:mA voltage:mV power:w
-gpu = apm.collectGpu() # %
+# Collect single metric
+cpu = apm.collectCpu()           # CPU usage (%)
+memory = apm.collectMemory()     # Memory (MB)
+fps = apm.collectFps()           # Frames per second (Hz)
+gpu = apm.collectGpu()           # GPU usage (%)
+network = apm.collectNetwork()   # Network traffic (KB)
+battery = apm.collectBattery()  # Battery level, temp, current
 
-# ************* Collect all performance parameter ************* #
- 
+# Collect all metrics with report
 if __name__ == '__main__':
-  apm = AppPerformanceMonitor(pkgName='com.bilibili.app.in',platform='Android', deviceId='ca6bd5a5', surfaceview=True, 
-                              noLog=False, pid=None, record=False, collect_all=True, duration=0)
-  # apm = AppPerformanceMonitor(pkgName='com.bilibili.app.in', platform='iOS',  deviceId='xxxx', noLog=False, record=False, collect_all=True, duration=0)
-  #duration: running time (second)
-  #record: record android screen
-  apm.collectAll(report_path=None) # report_path='/test/report.html'
-
-# in other python file
-from solox.public.apm import initPerformanceService  
-
-initPerformanceService.stop() # stop solox
+    apm = AppPerformanceMonitor(
+        pkgName='com.bilibili.app.in',
+        platform='Android',
+        deviceId='ca6bd5a5',
+        collect_all=True,
+        duration=300  # 5 minutes
+    )
+    apm.collectAll(report_path='/path/to/report.html')
 ```
 
-## 🏴󠁣󠁩󠁣󠁭󠁿Service API
+### iOS Example
+```python
+from solox.public.apm import AppPerformanceMonitor
 
-### Start the service in the background
-
+apm = AppPerformanceMonitor(
+    pkgName='com.bilibili.app.in',
+    platform='iOS',
+    deviceId='xxxx',  # iOS device ID
+    noLog=False,
+    collect_all=True
+)
+apm.collectAll()
 ```
-# solox version >= 2.1.5
 
-macOS/Linux: nohup python3 -m solox &
-Windows: start /min python3 -m solox &
-```
+## 🔗 Service API
 
-### Request performance data from api
-
+### Start as Background Service
 ```shell
-Android: http://{ip}:{port}/apm/collect?platform=Android&deviceid=ca6bd5a5&pkgname=com.bilibili.app.in&target=cpu
-iOS: http://{ip}:{port}/apm/collect?platform=iOS&pkgname=com.bilibili.app.in&target=cpu
+# macOS/Linux
+nohup python3 -m solox &
 
-target in ['cpu','memory','memory_detail','network','fps','battery','gpu']
+# Windows
+start /min python3 -m solox
 ```
 
-## 🔥Features
+### Query Performance Data
+```shell
+# Android
+curl "http://localhost:6006/apm/collect?platform=Android&deviceid=DEVICE_ID&pkgname=com.example.app&target=cpu"
 
-* **No ROOT/Jailbreak:** No need of Root for Android devices, Jailbreak for iOS devices. Efficiently solving the test and analysis challenges in Android & iOS performance.
-* **Data Integrality:** We provide the data about CPU, GPU, Memory, Battery, Network,FPS, Jank, etc., which you may easy to get.
-* **Beautiful Report:** A beautiful and detailed report analysis, where to store, visualize, edit, manage, and download all the test cases collected with SoloX no matter where you are or when is it.
-* **Useful Monitoring Settings:** Support setting alarm values, collecting duration, and accessing mobile devices on other PC machines during the monitoring process.
-* **PK Model:** Supports simultaneous comparative testing of two mobile devices.
+# iOS
+curl "http://localhost:6006/apm/collect?platform=iOS&pkgname=com.example.app&target=cpu"
 
-  - 🌱2-devices: test the same app on two different phones.
-  - 🌱2-apps: test two different apps on two phones with the same configuration.
-* **Collect In Python/API:** Support Python and API to collect performance data, helping users easily integrate into automated testing processes.
-
-## Develop
-
-* https://github.com/pallets/flask
-* https://github.com/tabler/tabler
-
-#### debug
-
-* remove [solox] moudel in all python file
-
-```python
-
-example
-from solox.view.apis import api  
-change to 
-from view.apis import api
-
+# Available targets: cpu, memory, memory_detail, network, fps, battery, gpu
 ```
 
-* run [python ./solox/debug.py]
+## 🔥 Features
 
-```python
+| Feature | Description |
+|---------|-------------|
+| 📱 **No ROOT Required** | Android 6.0+ without ROOT, iOS without Jailbreak |
+| 📊 **Comprehensive Metrics** | CPU, GPU, Memory, Network, FPS, Jank, Battery |
+| 📈 **Beautiful Reports** | Interactive charts, data export, compare mode |
+| ⚡ **Real-time Monitoring** | Live performance data with low overhead |
+| 🔄 **PK Mode** | Compare two devices or two apps simultaneously |
+| 🐍 **Python API** | Integrate into your automation framework |
+| 🌐 **Remote Access** | Monitor devices on other machines |
+| 🔔 **Alert Settings** | Configurable thresholds for all metrics |
+| ⏰ **Scheduled Tests** | Set duration and automatic collection |
+
+### Supported Platforms
+
+| Platform | Version | Notes |
+|----------|---------|-------|
+| Android | 6.0 - 16+ | Uses gfxinfo for SDK 31+ (Android 12+) |
+| iOS | 10 - 16 | taobao-iphone-device |
+| iOS | 17+ | py-ios-device |
+
+## 🖥️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      SoloX Web UI                          │
+│                    (Tabler Dashboard)                       │
+├─────────────────────────────────────────────────────────────┤
+│                      Flask Server                           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
+│  │   APM    │  │   View   │  │  WebSocket │ │   API   │   │
+│  │  Module  │  │  Module  │  │  Real-time │ │ Service │   │
+│  └────┬─────┘  └────┬─────┘  └─────┬─────┘  └────┬─────┘   │
+├───────┼─────────────┼──────────────┼─────────────┼────────┤
+│       │             │              │             │        │
+│  ┌────▼─────┐  ┌────▼─────┐  ┌─────▼─────┐  ┌───▼───┐   │
+│  │   ADB    │  │py-ios-   │  │  Web      │  │ File  │   │
+│  │ (Android)│  │ device   │  │  Socket   │  │ Store │   │
+│  └──────────┘  │  (iOS)   │  └───────────┘  └────────┘   │
+│                └──────────┘                                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## 🛠️ Development
+
+### Tech Stack
+- **Web Framework**: [Flask](https://github.com/pallets/flask)
+- **UI Library**: [Tabler](https://github.com/tabler/tabler)
+- **Charts**: ApexCharts, Highcharts
+- **Mobile Access**: ADB, [py-ios-device](https://github.com/Minions777/py-ios-device), [taobao-iphone-device](https://github.com/alibaba/taobao-iphone-device)
+
+### Debug Mode
+```shell
+# Remove [solox] module prefix from imports
+# Example: from solox.view.apis import api  →  from view.apis import api
+
 cd solox
 python debug.py
 ```
 
-## Browser
+## 📋 Report Metrics
 
-<img src="https://cdn.nlark.com/yuque/0/2023/png/153412/1677553244198-96ce5709-f33f-4038-888f-f330d1f74450.png" alt="Chrome" width="50px" height="50px" />
+| Metric | Description | Android | iOS |
+|--------|-------------|---------|-----|
+| CPU App | Application CPU usage | ✅ | ✅ |
+| CPU System | System CPU usage | ✅ | - |
+| Memory | Total memory usage | ✅ | ✅ |
+| Memory Detail | Detailed memory breakdown | ✅ | - |
+| FPS | Frames per second | ✅ | ✅ |
+| Jank | Frame drops | ✅ | - |
+| GPU | GPU usage | ✅ | - |
+| Network Up | Upload traffic | ✅ | ✅ |
+| Network Down | Download traffic | ✅ | ✅ |
+| Battery | Battery level & status | ✅ | - |
 
-## Terminal
+## 🎨 Screenshots
 
-- windows: PowerShell
-- macOS：iTerm2 (https://iterm2.com/)
+### Normal Mode
+Performance monitoring for single device
 
-## 💕Thanks
+### PK Mode
+Compare two devices or apps simultaneously
+- **2-devices**: Same app on two different phones
+- **2-apps**: Different apps on phones with same configuration
 
-- https://github.com/alibaba/taobao-iphone-device
-- https://github.com/Genymobile/scrcpy
+## 💕 Acknowledgements
+
+- [taobao-iphone-device](https://github.com/alibaba/taobao-iphone-device) - iOS device access
+- [py-ios-device](https://github.com/Minions777/py-ios-device) - iOS 17+ support
+- [scrcpy](https://github.com/Genymobile/scrcpy) - Android screen mirroring
+- [Tabler](https://github.com/tabler/tabler) - Dashboard UI framework
+
+## 📄 License
+
+MIT License - See [LICENSE](LICENSE) for details.
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+---
+
+<p align="center">
+Made with ❤️ by <a href="https://github.com/smart-test-ti">SMART TEST</a> Team
+</p>
