@@ -1,407 +1,271 @@
+#!/usr/bin/env python3
+# encoding=utf-8
+"""
+@Author  : Lijiawei
+@Date    : 2022/6/19
+@Desc    : Common utilities for SoloX
+@Update  : 2026/4/23 - subprocess替代popen, BufferedLogWriter, 统一异常处理
+"""
+from __future__ import absolute_import, print_function
+
 import json
 import os
 import platform
 import re
 import shutil
+import subprocess
 import time
+import signal
+import socket
+import ssl
+from functools import wraps
+from typing import Optional, List, Dict, Any, Tuple
+from enum import Enum
+
 import requests
+import cv2
+import psutil
 from logzero import logger
 from tqdm import tqdm
-import socket
-from urllib.request import urlopen
-import ssl
-import xlwt
-import psutil
-import signal
-import cv2
-from functools import wraps
 from jinja2 import Environment, FileSystemLoader
-# py-ios-device: supports iOS 17+ (replacement for tidevice)
+
 try:
     from py_ios_device.ios_device import Device
     from py_ios_device.usbmux import Usbmux
 except ImportError:
-    # Fallback for backward compatibility
     from tidevice._device import Device
     from tidevice import Usbmux
+
 from solox.public.adb import adb
 
 
-class Platform:
-    Android = 'Android'
-    iOS = 'iOS'
-    Mac = 'MacOS'
-    Windows = 'Windows'
+# ─────────────────────────────────────────────────────────────────────────────
+# Platform Enum
+# ─────────────────────────────────────────────────────────────────────────────
+class Platform(Enum):
+    Android = "Android"
+    iOS = "iOS"
+    Mac = "MacOS"
+    Windows = "Windows"
 
-class Devices:
+    @classmethod
+    def from_string(cls, value: str) -> "Platform":
+        """Safe platform from string, case-insensitive."""
+        value = value.strip().lower()
+        for p in cls:
+            if p.value.lower() == value:
+                return p
+        raise ValueError(f"Unknown platform: {value}")
 
-    def __init__(self, platform=Platform.Android):
-        self.platform = platform
-        self.adb = adb.adb_path
 
-    def execCmd(self, cmd):
-        """Execute the command to get the terminal print result"""
-        r = os.popen(cmd)
+# ─────────────────────────────────────────────────────────────────────────────
+# Buffered Log Writer — reduces disk IO from N opens per second to 1 per batch
+# ─────────────────────────────────────────────────────────────────────────────
+class BufferedLogWriter:
+    """
+    Accumulates log entries in memory and flushes to disk in batches.
+    Dramatically reduces disk IO for high-frequency APM collection.
+    """
+
+    def __init__(self, path: str, flush_interval: int = 10, max_buffer: int = 100):
+        self.path = path
+        self._buffer: List[str] = []
+        self._flush_interval = flush_interval  # seconds
+        self._max_buffer = max_buffer  # entries
+        self._last_flush = time.time()
+        self._lock = __import__("threading").Lock()
+        self._ensure_dir()
+
+    def _ensure_dir(self):
+        dir_path = os.path.dirname(self.path)
+        if dir_path and not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
+
+    def write(self, line: str):
+        """Thread-safe write with auto-flush."""
+        with self._lock:
+            self._buffer.append(line)
+            should_flush = (
+                len(self._buffer) >= self._max_buffer
+                or time.time() - self._last_flush >= self._flush_interval
+            )
+            if should_flush:
+                self._flush()
+
+    def _flush(self):
+        if not self._buffer:
+            return
         try:
-            text = r.buffer.read().decode(encoding='gbk').replace('\x1b[0m','').strip()
-        except UnicodeDecodeError:
-            text = r.buffer.read().decode(encoding='utf-8').replace('\x1b[0m','').strip()
-        finally:
-            r.close()
-        return text
-
-    def filterType(self):
-        """Select the pipe filtering method according to the system"""
-        filtertype = ('grep', 'findstr')[platform.system() == Platform.Windows]
-        return filtertype
-
-    def getDeviceIds(self):
-        """Get all connected device ids"""
-        Ids = list(os.popen(f"{self.adb} devices").readlines())
-        deviceIds = []
-        for i in range(1, len(Ids) - 1):
-            id, state = Ids[i].strip().split()
-            if state == 'device':
-                deviceIds.append(id)
-        return deviceIds
-
-    def getDevicesName(self, deviceId):
-        """Get the device name of the Android corresponding device ID"""
-        try:
-            devices_name = os.popen(f'{self.adb} -s {deviceId} shell getprop ro.product.model').readlines()[0].strip()
-        except Exception:
-            devices_name = os.popen(f'{self.adb} -s {deviceId} shell getprop ro.product.model').buffer.readlines()[0].decode("utf-8").strip()
-        return devices_name
-
-    def getDevices(self):
-        """Get all Android devices"""
-        DeviceIds = self.getDeviceIds()
-        Devices = [f'{id}({self.getDevicesName(id)})' for id in DeviceIds]
-        logger.info('Connected devices: {}'.format(Devices))
-        return Devices
-
-    def getIdbyDevice(self, deviceinfo, platform):
-        """Obtain the corresponding device id according to the Android device information"""
-        if platform == Platform.Android:
-            deviceId = re.sub(u"\\(.*?\\)|\\{.*?}|\\[.*?]", "", deviceinfo)
-            if deviceId not in self.getDeviceIds():
-                raise Exception('no device found')
-        else:
-            deviceId = deviceinfo
-        return deviceId
-    
-    def getSdkVersion(self, deviceId):
-        version = adb.shell(cmd='getprop ro.build.version.sdk', deviceId=deviceId)
-        return version
-
-    def getSdkVersionInt(self, deviceId) -> int:
-        """Return integer SDK version, default 0 if parsing fails"""
-        version = self.getSdkVersion(deviceId)
-        try:
-            return int(version.strip())
-        except (ValueError, AttributeError):
-            return 0
-
-    def isAndroidVersionAbove(self, deviceId, version: int) -> bool:
-        """Check if Android version is >= specified version"""
-        return self.getSdkVersionInt(deviceId) >= version
-
-    def getAndroidVersionRelease(self, deviceId) -> str:
-        """Return Android version release string (e.g., '14', '15')"""
-        return adb.shell(cmd='getprop ro.build.version.release', deviceId=deviceId).strip()
-
-    def getCpuCores(self, deviceId):
-        """get Android cpu cores"""
-        cmd = 'cat /sys/devices/system/cpu/online'
-        result = adb.shell(cmd=cmd, deviceId=deviceId)
-        try:
-            nums = int(result.split('-')[1]) + 1
-        except:
-            nums = 1
-        return nums
-
-    def getPid(self, deviceId, pkgName):
-        """Get the pid corresponding to the Android package name"""
-        try:
-            sdkversion = self.getSdkVersion(deviceId)
-            if sdkversion and int(sdkversion) < 26:
-                result = os.popen(f"{self.adb} -s {deviceId} shell ps | {self.filterType()} {pkgName}").readlines()
-                processList = ['{}:{}'.format(process.split()[1],process.split()[8]) for process in result]
-            else:
-                result = os.popen(f"{self.adb} -s {deviceId} shell ps -ef | {self.filterType()} {pkgName}").readlines()
-                processList = ['{}:{}'.format(process.split()[1],process.split()[7]) for process in result]
-            for i in range(len(processList)):
-                if processList[i].count(':') == 1:
-                    index = processList.index(processList[i])
-                    processList.insert(0, processList.pop(index))
-                    break
-            if len(processList) == 0:
-               logger.warning('{}: no pid found'.format(pkgName))     
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.writelines(self._buffer)
+            self._buffer.clear()
+            self._last_flush = time.time()
         except Exception as e:
-            processList = []
-            logger.exception(e)
-        return processList
+            logger.warning(f"Log flush failed: {e}")
 
-    def checkPkgname(self, pkgname):
-        flag = True
-        replace_list = ['com.google']
-        for i in replace_list:
-            if i in pkgname:
-                flag = False
-        return flag
+    def flush(self):
+        """Force flush."""
+        with self._lock:
+            self._flush()
 
-    def getPkgname(self, deviceId):
-        """Get all package names of Android devices"""
-        pkginfo = os.popen(f"{self.adb} -s {deviceId} shell pm list packages --user 0")
-        pkglist = [p.lstrip('package').lstrip(":").strip() for p in pkginfo]
-        if pkglist.__len__() > 0:
-            return pkglist
-        else:
-            pkginfo = os.popen(f"{self.adb} -s {deviceId} shell pm list packages")
-            pkglist = [p.lstrip('package').lstrip(":").strip() for p in pkginfo]
-            return pkglist
-
-    def getDeviceInfoByiOS(self):
-        """Get a list of all successfully connected iOS devices"""
-        deviceInfo = [udid for udid in Usbmux().device_udid_list()]
-        logger.info('Connected devices: {}'.format(deviceInfo))    
-        return deviceInfo
-
-    def getPkgnameByiOS(self, udid):
-        """Get all package names of the corresponding iOS device"""
-        d = Device(udid)
-        pkgNames = [i.get("CFBundleIdentifier") for i in d.installation.iter_installed(app_type="User")]
-        return pkgNames
-    
-    def get_pc_ip(self):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(('8.8.8.8', 80))
-            ip = s.getsockname()[0]
-        except Exception:
-            logger.error('get local ip failed')
-            ip = '127.0.0.1'
-        finally:
-            s.close()
-        return ip
-    
-    def get_device_ip(self, deviceId):
-        content = os.popen(f"{self.adb} -s {deviceId} shell ip addr show wlan0").read()
-        logger.info(content)
-        math_obj = re.search(r'inet\s(\d+\.\d+\.\d+\.\d+).*?wlan0', content)
-        if math_obj and math_obj.group(1):
-            return math_obj.group(1)
-        return None
-    
-    def devicesCheck(self, platform, deviceid=None, pkgname=None):
-        """Check the device environment"""
-        match(platform):
-            case Platform.Android:
-                if len(self.getDeviceIds()) == 0:
-                    raise Exception('no devices found')
-                if len(self.getPid(deviceId=deviceid, pkgName=pkgname)) == 0:
-                    raise Exception('no process found')
-            case Platform.iOS:
-                if len(self.getDeviceInfoByiOS()) == 0:
-                    raise Exception('no devices found')
-            case _:
-                raise Exception('platform must be Android or iOS')        
-            
-    def getDdeviceDetail(self, deviceId, platform):
-        result = dict()
-        match(platform):
-            case Platform.Android:
-                result['brand'] = adb.shell(cmd='getprop ro.product.brand', deviceId=deviceId)
-                result['name'] = adb.shell(cmd='getprop ro.product.model', deviceId=deviceId)
-                result['version'] = adb.shell(cmd='getprop ro.build.version.release', deviceId=deviceId)
-                result['serialno'] = adb.shell(cmd='getprop ro.serialno', deviceId=deviceId)
-                cmd = f'ip addr show wlan0 | {self.filterType()} link/ether'
-                wifiadr_content = adb.shell(cmd=cmd, deviceId=deviceId)                
-                result['wifiadr'] = Method._index(wifiadr_content.split(), 1, '')
-                result['cpu_cores'] = self.getCpuCores(deviceId)
-                result['physical_size'] = adb.shell(cmd='wm size', deviceId=deviceId).replace('Physical size:','').strip()
-            case Platform.iOS:
-                ios_device = Device(udid=deviceId)
-                result['brand'] = ios_device.get_value("DeviceClass", no_session=True)
-                result['name'] = ios_device.get_value("DeviceName", no_session=True)
-                result['version'] = ios_device.get_value("ProductVersion", no_session=True)
-                result['serialno'] = deviceId
-                result['wifiadr'] = ios_device.get_value("WiFiAddress", no_session=True)
-                result['cpu_cores'] = 0
-                result['physical_size'] = self.getPhysicalSzieOfiOS(deviceId)
-            case _:
-                raise Exception('{} is undefined'.format(platform)) 
-        return result
-    
-    def getPhysicalSzieOfiOS(self, deviceId):
-        ios_device = Device(udid=deviceId)
-        try:
-            screen_info = ios_device.screen_info()
-            PhysicalSzie = '{}x{}'.format(screen_info.get('width'), screen_info.get('height'))
-        except Exception as e:
-            PhysicalSzie = ''  
-            logger.exception(e)  
-        return PhysicalSzie
-    
-    def getCurrentActivity(self, deviceId):
-        result = adb.shell(cmd='dumpsys window | {} mCurrentFocus'.format(self.filterType()), deviceId=deviceId)
-        if result.__contains__('mCurrentFocus'):
-            activity = str(result).split(' ')[-1].replace('}','') 
-            return activity
-        else:
-            raise Exception('No activity found')
-
-    def getStartupTimeByAndroid(self, activity, deviceId):
-        result = adb.shell(cmd='am start -W {}'.format(activity), deviceId=deviceId)
-        return result
-
-    def getStartupTimeByiOS(self, pkgname):
-        try:
-            import ios_device
-        except ImportError:
-            logger.error('py-ios-devices not found, please run [pip install py-ios-devices]') 
-        result = self.execCmd('pyidevice instruments app_lifecycle -b {}'.format(pkgname))       
-        return result          
 
 class File:
+    """
+    File operations with buffered logging and improved resource management.
+    """
 
-    def __init__(self, fileroot='.'):
+    # Global log writer registry: path -> BufferedLogWriter
+    _log_writers: Dict[str, BufferedLogWriter] = {}
+    _writers_lock = __import__("threading").Lock()
+
+    def __init__(self, fileroot: str = "."):
         self.fileroot = fileroot
-        self.report_dir = self.get_repordir()
+        self.report_dir = self.get_report_dir()
+
+    def _get_log_writer(self, path: str) -> BufferedLogWriter:
+        """Get or create a buffered log writer for a path."""
+        with self._writers_lock:
+            if path not in self._log_writers:
+                self._log_writers[path] = BufferedLogWriter(path)
+            return self._log_writers[path]
 
     def clear_file(self):
-        logger.info('Clean up useless files ...')
-        if os.path.exists(self.report_dir):
-            for f in os.listdir(self.report_dir):
-                filename = os.path.join(self.report_dir, f)
-                if f.split(".")[-1] in ['log', 'json', 'mkv']:
-                    os.remove(filename)
-        Scrcpy.stop_record()            
-        logger.info('Clean up useless files success')            
+        """Clean up useless files from report directory."""
+        logger.info("Cleaning up report files ...")
+        if not os.path.exists(self.report_dir):
+            return
+        for f in os.listdir(self.report_dir):
+            filepath = os.path.join(self.report_dir, f)
+            try:
+                if os.path.isfile(filepath) and f.split(".")[-1] in ["log", "json", "mkv"]:
+                    os.remove(filepath)
+            except Exception as e:
+                logger.warning(f"Failed to remove {filepath}: {e}")
+        # Clear log writers
+        with self._writers_lock:
+            self._log_writers.clear()
+        logger.info("Report cleanup complete")
 
-    def export_excel(self, platform, scene):
-        logger.info('Exporting excel ...')
-        android_log_file_list = ['cpu_app','cpu_sys','mem_total','mem_swap',
-                                 'battery_level', 'battery_tem','upflow','downflow','fps','gpu']
-        ios_log_file_list = ['cpu_app','cpu_sys', 'mem_total', 'battery_tem', 'battery_current', 
-                             'battery_voltage', 'battery_power','upflow','downflow','fps','gpu']
-        log_file_list = android_log_file_list if platform == 'Android' else ios_log_file_list
-        wb = xlwt.Workbook(encoding = 'utf-8')
-        k = 1
+    def add_log(self, path: str, log_time: str, value: Any):
+        """Write a log entry using buffered I/O."""
+        if value < 0:
+            return
+        writer = self._get_log_writer(path)
+        writer.write(f"{log_time}={value}\n")
+
+    def flush_all_logs(self):
+        """Force flush all buffered log writers."""
+        with self._writers_lock:
+            for writer in self._log_writers.values():
+                writer.flush()
+
+    def export_excel(self, platform: str, scene: str) -> str:
+        """Export log data to Excel file."""
+        import xlwt
+
+        logger.info("Exporting Excel ...")
+        android_log_file_list = [
+            "cpu_app", "cpu_sys", "mem_total", "mem_swap",
+            "battery_level", "battery_tem", "upflow", "downflow", "fps", "gpu",
+        ]
+        ios_log_file_list = [
+            "cpu_app", "cpu_sys", "mem_total",
+            "battery_tem", "battery_current", "battery_voltage", "battery_power",
+            "upflow", "downflow", "fps", "gpu",
+        ]
+        log_file_list = android_log_file_list if platform == Platform.Android.value else ios_log_file_list
+
+        wb = xlwt.Workbook(encoding="utf-8")
         for name in log_file_list:
-            ws1 = wb.add_sheet(name)
-            ws1.write(0,0,'Time') 
-            ws1.write(0,1,'Value')
-            row = 1 #start row
-            col = 0 #start col
-            if os.path.exists(f'{self.report_dir}/{scene}/{name}.log'):
-                f = open(f'{self.report_dir}/{scene}/{name}.log','r',encoding='utf-8')
-                for lines in f: 
-                    target = lines.split('=')
-                    k += 1
-                    for i in range(len(target)):
-                        ws1.write(row, col ,target[i])
-                        col += 1
-                    row += 1
-                    col = 0
-        xls_path = os.path.join(self.report_dir, scene, f'{scene}.xls')            
+            ws = wb.add_sheet(name)
+            ws.write(0, 0, "Time")
+            ws.write(0, 1, "Value")
+            log_path = os.path.join(self.report_dir, scene, f"{name}.log")
+            if not os.path.exists(log_path):
+                continue
+            try:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    for row, line in enumerate(f, start=1):
+                        parts = line.strip().split("=", 1)
+                        if len(parts) == 2:
+                            ws.write(row, 0, parts[0])
+                            ws.write(row, 1, parts[1])
+            except Exception as e:
+                logger.warning(f"Failed to read {log_path}: {e}")
+
+        xls_path = os.path.join(self.report_dir, scene, f"{scene}.xls")
         wb.save(xls_path)
-        logger.info('Exporting excel success : {}'.format(xls_path))
-        return xls_path   
-    
-    def make_android_html(self, scene, summary : dict, report_path=None):
-        logger.info('Generating HTML ...')
+        logger.info(f"Excel export complete: {xls_path}")
+        return xls_path
+
+    def make_android_html(self, scene: str, summary: Dict, report_path: str = None) -> str:
+        """Generate Android HTML report."""
+        logger.info("Generating Android HTML report ...")
         STATICPATH = os.path.dirname(os.path.realpath(__file__))
-        file_loader = FileSystemLoader(os.path.join(STATICPATH, 'report_template'))
-        env = Environment(loader=file_loader)
-        template = env.get_template('android.html')
-        if report_path:
-            html_path = report_path
-        else:
-            html_path = os.path.join(self.report_dir, scene, 'report.html')   
-        with open(html_path,'w+') as fout:
-            html_content = template.render(devices=summary['devices'],app=summary['app'],
-                                           platform=summary['platform'],ctime=summary['ctime'],
-                                           cpu_app=summary['cpu_app'],cpu_sys=summary['cpu_sys'],
-                                           mem_total=summary['mem_total'],mem_swap=summary['mem_swap'],
-                                           fps=summary['fps'],jank=summary['jank'],level=summary['level'],
-                                           tem=summary['tem'],net_send=summary['net_send'],
-                                           net_recv=summary['net_recv'],cpu_charts=summary['cpu_charts'],
-                                           mem_charts=summary['mem_charts'],net_charts=summary['net_charts'],
-                                           battery_charts=summary['battery_charts'],fps_charts=summary['fps_charts'],
-                                           jank_charts=summary['jank_charts'],mem_detail_charts=summary['mem_detail_charts'],
-                                           gpu=summary['gpu'], gpu_charts=summary['gpu_charts'])
-            
-            fout.write(html_content)
-        logger.info('Generating HTML success : {}'.format(html_path))  
+        env = Environment(loader=FileSystemLoader(os.path.join(STATICPATH, "report_template")))
+        template = env.get_template("android.html")
+        html_path = report_path or os.path.join(self.report_dir, scene, "report.html")
+        os.makedirs(os.path.dirname(html_path), exist_ok=True)
+        try:
+            html_content = template.render(**summary)
+            with open(html_path, "w", encoding="utf-8") as fout:
+                fout.write(html_content)
+            logger.info(f"Android HTML report generated: {html_path}")
+        except Exception as e:
+            logger.exception(e)
         return html_path
-    
-    def make_ios_html(self, scene, summary : dict, report_path=None):
-        logger.info('Generating HTML ...')
+
+    def make_ios_html(self, scene: str, summary: Dict, report_path: str = None) -> str:
+        """Generate iOS HTML report."""
+        logger.info("Generating iOS HTML report ...")
         STATICPATH = os.path.dirname(os.path.realpath(__file__))
-        file_loader = FileSystemLoader(os.path.join(STATICPATH, 'report_template'))
-        env = Environment(loader=file_loader)
-        template = env.get_template('ios.html')
-        if report_path:
-            html_path = report_path
-        else:
-            html_path = os.path.join(self.report_dir, scene, 'report.html')
-        with open(html_path,'w+') as fout:
-            html_content = template.render(devices=summary['devices'],app=summary['app'],
-                                           platform=summary['platform'],ctime=summary['ctime'],
-                                           cpu_app=summary['cpu_app'],cpu_sys=summary['cpu_sys'],gpu=summary['gpu'],
-                                           mem_total=summary['mem_total'],fps=summary['fps'],
-                                           tem=summary['tem'],current=summary['current'],
-                                           voltage=summary['voltage'],power=summary['power'],
-                                           net_send=summary['net_send'],net_recv=summary['net_recv'],
-                                           cpu_charts=summary['cpu_charts'],mem_charts=summary['mem_charts'],
-                                           net_charts=summary['net_charts'],battery_charts=summary['battery_charts'],
-                                           fps_charts=summary['fps_charts'],gpu_charts=summary['gpu_charts'])            
-            fout.write(html_content)
-        logger.info('Generating HTML success : {}'.format(html_path))  
+        env = Environment(loader=FileSystemLoader(os.path.join(STATICPATH, "report_template")))
+        template = env.get_template("ios.html")
+        html_path = report_path or os.path.join(self.report_dir, scene, "report.html")
+        os.makedirs(os.path.dirname(html_path), exist_ok=True)
+        try:
+            html_content = template.render(**summary)
+            with open(html_path, "w", encoding="utf-8") as fout:
+                fout.write(html_content)
+            logger.info(f"iOS HTML report generated: {html_path}")
+        except Exception as e:
+            logger.exception(e)
         return html_path
-  
-    def filter_secen(self, scene):
+
+    def filter_scene(self, scene: str) -> List[str]:
+        """Return report directories sorted by modification time, excluding current."""
         dirs = os.listdir(self.report_dir)
-        dir_list = list(reversed(sorted(dirs, key=lambda x: os.path.getmtime(os.path.join(self.report_dir, x)))))
-        dir_list.remove(scene)
+        dir_list = sorted(dirs, key=lambda x: os.path.getmtime(os.path.join(self.report_dir, x)), reverse=True)
+        if scene in dir_list:
+            dir_list.remove(scene)
         return dir_list
 
-    def get_repordir(self):
-        report_dir = os.path.join(os.getcwd(), 'report')
+    def get_report_dir(self) -> str:
+        """Get or create the report directory."""
+        report_dir = os.path.join(os.getcwd(), "report")
         if not os.path.exists(report_dir):
-            os.mkdir(report_dir)
+            os.makedirs(report_dir, exist_ok=True)
         return report_dir
 
-    def create_file(self, filename, content=''):
+    def create_file(self, filename: str, content: str = ""):
+        """Create a file with optional content."""
         if not os.path.exists(self.report_dir):
-            os.mkdir(self.report_dir)
-        with open(os.path.join(self.report_dir, filename), 'a+', encoding="utf-8") as file:
-            file.write(content)
+            os.makedirs(self.report_dir, exist_ok=True)
+        filepath = os.path.join(self.report_dir, filename)
+        with open(filepath, "a+", encoding="utf-8") as f:
+            f.write(content)
+        return filepath
 
-    def add_log(self, path, log_time, value):
-        if value >= 0:
-            with open(path, 'a+', encoding="utf-8") as file:
-                file.write(f'{log_time}={str(value)}' + '\n')
-    
-    def record_net(self, type, send , recv):
-        net_dict = dict()
-        match(type):
-            case 'pre':
-                net_dict['send'] = send
-                net_dict['recv'] = recv
-                content = json.dumps(net_dict)
-                self.create_file(filename='pre_net.json', content=content)
-            case 'end':
-                net_dict['send'] = send
-                net_dict['recv'] = recv
-                content = json.dumps(net_dict)
-                self.create_file(filename='end_net.json', content=content)
-            case _:
-                logger.error('record network data failed')
-    
-    def make_report(self, app, devices, video, platform=Platform.Android, model='normal', cores=0):
-        logger.info('Generating test results ...')
+    def record_net(self, net_type: str, send: float, recv: float):
+        """Record network data to JSON file."""
+        net_dict = {"send": send, "recv": recv}
+        content = json.dumps(net_dict)
+        filename = f"{net_type}_net.json"
+        self.create_file(filename=filename, content=content)
+
+    def make_report(self, app: str, devices: str, video: str, platform: str = "Android", model: str = "normal", cores: int = 0) -> str:
+        """Generate test report and organize log files."""
+        logger.info("Generating test results ...")
         current_time = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
         result_dict = {
             "app": app,
@@ -411,673 +275,639 @@ class File:
             "devices": devices,
             "ctime": current_time,
             "video": video,
-            "cores":cores
+            "cores": cores,
         }
-        content = json.dumps(result_dict)
-        self.create_file(filename='result.json', content=content)
-        report_new_dir = os.path.join(self.report_dir, f'apm_{current_time}')
+        self.create_file(filename="result.json", content=json.dumps(result_dict))
+
+        report_new_dir = os.path.join(self.report_dir, f"apm_{current_time}")
         if not os.path.exists(report_new_dir):
-            os.mkdir(report_new_dir)
+            os.makedirs(report_new_dir, exist_ok=True)
 
         for f in os.listdir(self.report_dir):
-            filename = os.path.join(self.report_dir, f)
-            if f.split(".")[-1] in ['log', 'json', 'mkv']:
-                shutil.move(filename, report_new_dir)        
-        logger.info('Generating test results success: {}'.format(report_new_dir))
-        return f'apm_{current_time}'        
+            filepath = os.path.join(self.report_dir, f)
+            if os.path.isfile(filepath) and f.split(".")[-1] in ["log", "json", "mkv"]:
+                shutil.move(filepath, report_new_dir)
 
-    def instance_type(self, data):
-        if isinstance(data, float):
-            return 'float'
-        elif isinstance(data, int):
-            return 'int'
-        else:
-            return 'int'
-    
-    def open_file(self, path, mode):
-        with open(path, mode) as f:
+        logger.info(f"Test results generated: {report_new_dir}")
+        # Flush all buffered logs
+        self.flush_all_logs()
+        return f"apm_{current_time}"
+
+    def open_file(self, path: str, mode: str = "r"):
+        """Generator that yields lines from a file."""
+        if not os.path.exists(path):
+            return
+        with open(path, mode, encoding="utf-8") as f:
             for line in f:
                 yield line
-    
-    def readJson(self, scene):
-        path = os.path.join(self.report_dir,scene,'result.json')
-        result_json = open(file=path, mode='r').read()
-        result_dict = json.loads(result_json)
-        return result_dict
 
-    def readLog(self, scene, filename):
-        """Read apmlog file data"""
-        log_data_list = list()
-        target_data_list = list()
-        if os.path.exists(os.path.join(self.report_dir,scene,filename)):
-            lines = self.open_file(os.path.join(self.report_dir,scene,filename), "r")
-            for line in lines:
-                if isinstance(line.split('=')[1].strip(), int):
-                    log_data_list.append({
-                        "x": line.split('=')[0].strip(),
-                        "y": int(line.split('=')[1].strip())
-                    })
-                    target_data_list.append(int(line.split('=')[1].strip()))
-                else:
-                    log_data_list.append({
-                        "x": line.split('=')[0].strip(),
-                        "y": float(line.split('=')[1].strip())
-                    })
-                    target_data_list.append(float(line.split('=')[1].strip()))
+    def read_json(self, scene: str) -> Dict:
+        """Read result.json for a scene."""
+        path = os.path.join(self.report_dir, scene, "result.json")
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.loads(f.read())
+        except Exception as e:
+            logger.warning(f"Failed to read {path}: {e}")
+            return {}
+
+    def read_log(self, scene: str, filename: str) -> Tuple[List[Dict], List[float]]:
+        """
+        Read APM log file and return (point_list, value_list).
+        point_list: [{'x': time_str, 'y': value}, ...]
+        value_list: [v1, v2, ...]
+        """
+        log_data_list = []
+        target_data_list = []
+        path = os.path.join(self.report_dir, scene, filename)
+        if not os.path.exists(path):
+            return log_data_list, target_data_list
+
+        for line in self.open_file(path, "r"):
+            if "=" not in line:
+                continue
+            parts = line.strip().split("=", 1)
+            if len(parts) != 2:
+                continue
+            time_str, val_str = parts
+            try:
+                value = float(val_str) if "." in val_str else int(val_str)
+                log_data_list.append({"x": time_str.strip(), "y": value})
+                target_data_list.append(value)
+            except ValueError:
+                continue
         return log_data_list, target_data_list
-        
-    def getCpuLog(self, platform, scene):
-        targetDic = dict()
-        targetDic['cpuAppData'] = self.readLog(scene=scene, filename='cpu_app.log')[0]
-        targetDic['cpuSysData'] = self.readLog(scene=scene, filename='cpu_sys.log')[0]
-        result = {'status': 1, 'cpuAppData': targetDic['cpuAppData'], 'cpuSysData': targetDic['cpuSysData']}
-        return result
-    
-    def getCpuLogCompare(self, platform, scene1, scene2):
-        targetDic = dict()
-        targetDic['scene1'] = self.readLog(scene=scene1, filename='cpu_app.log')[0]
-        targetDic['scene2'] = self.readLog(scene=scene2, filename='cpu_app.log')[0]
-        result = {'status': 1, 'scene1': targetDic['scene1'], 'scene2': targetDic['scene2']}
-        return result
-    
-    def getGpuLog(self, platform, scene):
-        targetDic = dict()
-        targetDic['gpu'] = self.readLog(scene=scene, filename='gpu.log')[0]
-        result = {'status': 1, 'gpu': targetDic['gpu']}
-        return result
-    
-    def getGpuLogCompare(self, platform, scene1, scene2):
-        targetDic = dict()
-        targetDic['scene1'] = self.readLog(scene=scene1, filename='gpu.log')[0]
-        targetDic['scene2'] = self.readLog(scene=scene2, filename='gpu.log')[0]
-        result = {'status': 1, 'scene1': targetDic['scene1'], 'scene2': targetDic['scene2']}
-        return result
-    
-    def getMemLog(self, platform, scene):
-        targetDic = dict()
-        targetDic['memTotalData'] = self.readLog(scene=scene, filename='mem_total.log')[0]
-        if platform == Platform.Android:
-            targetDic['memSwapData']  = self.readLog(scene=scene, filename='mem_swap.log')[0]
-            result = {'status': 1, 
-                      'memTotalData': targetDic['memTotalData'], 
-                      'memSwapData': targetDic['memSwapData']}
-        else:
-            result = {'status': 1, 'memTotalData': targetDic['memTotalData']}
-        return result
-    
-    def getMemDetailLog(self, platform, scene):
-        targetDic = dict()
-        targetDic['java_heap'] = self.readLog(scene=scene, filename='mem_java_heap.log')[0]
-        targetDic['native_heap'] = self.readLog(scene=scene, filename='mem_native_heap.log')[0]
-        targetDic['code_pss'] = self.readLog(scene=scene, filename='mem_code_pss.log')[0]
-        targetDic['stack_pss'] = self.readLog(scene=scene, filename='mem_stack_pss.log')[0]
-        targetDic['graphics_pss'] = self.readLog(scene=scene, filename='mem_graphics_pss.log')[0]
-        targetDic['private_pss'] = self.readLog(scene=scene, filename='mem_private_pss.log')[0]
-        targetDic['system_pss'] = self.readLog(scene=scene, filename='mem_system_pss.log')[0]
-        result = {'status': 1, 'memory_detail': targetDic}
-        return result
-    
-    def getCpuCoreLog(self, platform, scene):
-        targetDic = dict()
-        cores =self.readJson(scene=scene).get('cores', 0)
-        if int(cores) > 0:
-            for i in range(int(cores)):
-                targetDic['cpu{}'.format(i)] = self.readLog(scene=scene, filename='cpu{}.log'.format(i))[0]
-        result = {'status': 1, 'cores':cores, 'cpu_core': targetDic}
-        return result
-    
-    def getMemLogCompare(self, platform, scene1, scene2):
-        targetDic = dict()
-        targetDic['scene1'] = self.readLog(scene=scene1, filename='mem_total.log')[0]
-        targetDic['scene2'] = self.readLog(scene=scene2, filename='mem_total.log')[0]
-        result = {'status': 1, 'scene1': targetDic['scene1'], 'scene2': targetDic['scene2']}
-        return result
-    
-    def getBatteryLog(self, platform, scene):
-        targetDic = dict()
-        if platform == Platform.Android:
-            targetDic['batteryLevel'] = self.readLog(scene=scene, filename='battery_level.log')[0]
-            targetDic['batteryTem'] = self.readLog(scene=scene, filename='battery_tem.log')[0]
-            result = {'status': 1, 
-                      'batteryLevel': targetDic['batteryLevel'], 
-                      'batteryTem': targetDic['batteryTem']}
-        else:
-            targetDic['batteryTem'] = self.readLog(scene=scene, filename='battery_tem.log')[0]
-            targetDic['batteryCurrent'] = self.readLog(scene=scene, filename='battery_current.log')[0]
-            targetDic['batteryVoltage'] = self.readLog(scene=scene, filename='battery_voltage.log')[0]
-            targetDic['batteryPower'] = self.readLog(scene=scene, filename='battery_power.log')[0]
-            result = {'status': 1, 
-                      'batteryTem': targetDic['batteryTem'], 
-                      'batteryCurrent': targetDic['batteryCurrent'],
-                      'batteryVoltage': targetDic['batteryVoltage'], 
-                      'batteryPower': targetDic['batteryPower']}    
-        return result
-    
-    def getBatteryLogCompare(self, platform, scene1, scene2):
-        targetDic = dict()
-        if platform == Platform.Android:
-            targetDic['scene1'] = self.readLog(scene=scene1, filename='battery_level.log')[0]
-            targetDic['scene2'] = self.readLog(scene=scene2, filename='battery_level.log')[0]
-            result = {'status': 1, 'scene1': targetDic['scene1'], 'scene2': targetDic['scene2']}
-        else:
-            targetDic['scene1'] = self.readLog(scene=scene1, filename='batteryPower.log')[0]
-            targetDic['scene2'] = self.readLog(scene=scene2, filename='batteryPower.log')[0]
-            result = {'status': 1, 'scene1': targetDic['scene1'], 'scene2': targetDic['scene2']}    
-        return result
-    
-    def getFlowLog(self, platform, scene):
-        targetDic = dict()
-        targetDic['upFlow'] = self.readLog(scene=scene, filename='upflow.log')[0]
-        targetDic['downFlow'] = self.readLog(scene=scene, filename='downflow.log')[0]
-        result = {'status': 1, 'upFlow': targetDic['upFlow'], 'downFlow': targetDic['downFlow']}
-        return result
-    
-    def getFlowSendLogCompare(self, platform, scene1, scene2):
-        targetDic = dict()
-        targetDic['scene1'] = self.readLog(scene=scene1, filename='upflow.log')[0]
-        targetDic['scene2'] = self.readLog(scene=scene2, filename='upflow.log')[0]
-        result = {'status': 1, 'scene1': targetDic['scene1'], 'scene2': targetDic['scene2']}
-        return result
-    
-    def getFlowRecvLogCompare(self, platform, scene1, scene2):
-        targetDic = dict()
-        targetDic['scene1'] = self.readLog(scene=scene1, filename='downflow.log')[0]
-        targetDic['scene2'] = self.readLog(scene=scene2, filename='downflow.log')[0]
-        result = {'status': 1, 'scene1': targetDic['scene1'], 'scene2': targetDic['scene2']}
-        return result
-    
-    def getFpsLog(self, platform, scene):
-        targetDic = dict()
-        targetDic['fps'] = self.readLog(scene=scene, filename='fps.log')[0]
-        if platform == Platform.Android:
-            targetDic['jank'] = self.readLog(scene=scene, filename='jank.log')[0]
-            result = {'status': 1, 'fps': targetDic['fps'], 'jank': targetDic['jank']}
-        else:
-            result = {'status': 1, 'fps': targetDic['fps']}     
-        return result
-    
-    def getDiskLog(self, platform, scene):
-        targetDic = dict()
-        targetDic['used'] = self.readLog(scene=scene, filename='disk_used.log')[0]
-        targetDic['free'] = self.readLog(scene=scene, filename='disk_free.log')[0]
-        result = {'status': 1, 'used': targetDic['used'], 'free':targetDic['free']}
+
+    # ── Log aggregation helpers ─────────────────────────────────────────────
+
+    def get_cpu_log(self, platform: str, scene: str) -> Dict:
+        app_data = self.read_log(scene=scene, filename="cpu_app.log")[0]
+        sys_data = self.read_log(scene=scene, filename="cpu_sys.log")[0]
+        return {"status": 1, "cpuAppData": app_data, "cpuSysData": sys_data}
+
+    def get_mem_log(self, platform: str, scene: str) -> Dict:
+        result = {"status": 1, "memTotalData": self.read_log(scene=scene, filename="mem_total.log")[0]}
+        if platform == Platform.Android.value:
+            result["memSwapData"] = self.read_log(scene=scene, filename="mem_swap.log")[0]
         return result
 
-    def analysisDisk(self, scene):
-        initail_disk_list = list()
-        current_disk_list = list()
-        sum_init_disk = dict()
-        sum_current_disk = dict()
-        if os.path.exists(os.path.join(self.report_dir,scene,'initail_disk.log')):
-            size_list = list()
-            used_list = list()
-            free_list = list()
-            lines = self.open_file(os.path.join(self.report_dir,scene,'initail_disk.log'), "r")
-            for line in lines:
-                if 'Filesystem' not in line and line.strip() != '':
-                    disk_value_list = line.split()
-                    disk_dict = dict(
-                        filesystem = disk_value_list[0],
-                        blocks = disk_value_list[1],
-                        used = disk_value_list[2],
-                        available = disk_value_list[3],
-                        use_percent = disk_value_list[4],
-                        mounted = disk_value_list[5]
-                    )
-                    initail_disk_list.append(disk_dict)
-                    size_list.append(int(disk_value_list[1]))
-                    used_list.append(int(disk_value_list[2]))
-                    free_list.append(int(disk_value_list[3]))
-            sum_init_disk['sum_size'] = int(sum(size_list) / 1024 / 1024)
-            sum_init_disk['sum_used'] = int(sum(used_list) / 1024)
-            sum_init_disk['sum_free'] = int(sum(free_list) / 1024)
-               
-        if os.path.exists(os.path.join(self.report_dir,scene,'current_disk.log')):
-            size_list = list()
-            used_list = list()
-            free_list = list()
-            lines = self.open_file(os.path.join(self.report_dir,scene,'current_disk.log'), "r")
-            for line in lines:
-                if 'Filesystem' not in line and line.strip() != '':
-                    disk_value_list = line.split()
-                    disk_dict = dict(
-                        filesystem = disk_value_list[0],
-                        blocks = disk_value_list[1],
-                        used = disk_value_list[2],
-                        available = disk_value_list[3],
-                        use_percent = disk_value_list[4],
-                        mounted = disk_value_list[5]
-                    )
-                    current_disk_list.append(disk_dict)
-                    size_list.append(int(disk_value_list[1]))
-                    used_list.append(int(disk_value_list[2]))
-                    free_list.append(int(disk_value_list[3]))
-            sum_current_disk['sum_size'] = int(sum(size_list) / 1024 / 1024)
-            sum_current_disk['sum_used'] = int(sum(used_list) / 1024)
-            sum_current_disk['sum_free'] = int(sum(free_list) / 1024)       
-                 
-        return initail_disk_list, current_disk_list, sum_init_disk, sum_current_disk
-
-    def getFpsLogCompare(self, platform, scene1, scene2):
-        targetDic = dict()
-        targetDic['scene1'] = self.readLog(scene=scene1, filename='fps.log')[0]
-        targetDic['scene2'] = self.readLog(scene=scene2, filename='fps.log')[0]
-        result = {'status': 1, 'scene1': targetDic['scene1'], 'scene2': targetDic['scene2']}
+    def get_fps_log(self, platform: str, scene: str) -> Dict:
+        result = {"status": 1, "fps": self.read_log(scene=scene, filename="fps.log")[0]}
+        if platform == Platform.Android.value:
+            result["jank"] = self.read_log(scene=scene, filename="jank.log")[0]
         return result
-        
-    def approximateSize(self, size, a_kilobyte_is_1024_bytes=True):
-        '''
-        convert a file size to human-readable form.
-        Keyword arguments:
-        size -- file size in bytes
-        a_kilobyte_is_1024_bytes -- if True (default),use multiples of 1024
-                                    if False, use multiples of 1000
-        Returns: string
-        '''
 
-        suffixes = {1000: ['KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'],
-                    1024: ['KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB']}
-
+    def approximate_size(self, size: int, binary: bool = True) -> str:
+        """Convert bytes to human-readable string."""
         if size < 0:
-            raise ValueError('number must be non-negative')
-
-        multiple = 1024 if a_kilobyte_is_1024_bytes else 1000
-
-        for suffix in suffixes[multiple]:
+            raise ValueError("size must be non-negative")
+        multiple = 1024 if binary else 1000
+        units = ["B", "KB", "MB", "GB", "TB", "PB"]
+        for unit in units[:-1]:
             size /= multiple
             if size < multiple:
-                return '{0:.2f} {1}'.format(size, suffix)
-    
-    def _setAndroidPerfs(self, scene):
-        """Aggregate APM data for Android"""
-        
-        app = self.readJson(scene=scene).get('app')
-        devices = self.readJson(scene=scene).get('devices')
-        platform = self.readJson(scene=scene).get('platform')
-        ctime = self.readJson(scene=scene).get('ctime')
+                return f"{size:.2f} {unit}"
+        return f"{size:.2f} {units[-1]}"
 
-        cpuAppData = self.readLog(scene=scene, filename=f'cpu_app.log')[1]
-        cpuSystemData = self.readLog(scene=scene, filename=f'cpu_sys.log')[1]
-        if cpuAppData.__len__() > 0 and cpuSystemData.__len__() > 0:
-            cpuAppRate = f'{round(sum(cpuAppData) / len(cpuAppData), 2)}%'
-            cpuSystemRate = f'{round(sum(cpuSystemData) / len(cpuSystemData), 2)}%'
-        else:
-            cpuAppRate, cpuSystemRate = 0, 0    
+    def set_android_perfs(self, scene: str) -> Dict:
+        """Aggregate Android APM data."""
+        info = self.read_json(scene)
+        cpu_app = self.read_log(scene, "cpu_app.log")[1]
+        cpu_sys = self.read_log(scene, "cpu_sys.log")[1]
+        mem_total = self.read_log(scene, "mem_total.log")[1]
+        mem_swap = self.read_log(scene, "mem_swap.log")[1]
+        fps = self.read_log(scene, "fps.log")[1]
+        jank = self.read_log(scene, "jank.log")[1]
+        battery_level = self.read_log(scene, "battery_level.log")[1]
+        battery_tem = self.read_log(scene, "battery_tem.log")[1]
+        gpu = self.read_log(scene, "gpu.log")[1]
 
-        batteryLevelData = self.readLog(scene=scene, filename=f'battery_level.log')[1]
-        batteryTemlData = self.readLog(scene=scene, filename=f'battery_tem.log')[1]
-        if batteryLevelData.__len__() > 0 and batteryTemlData.__len__() > 0:
-            batteryLevel = f'{batteryLevelData[-1]}%'
-            batteryTeml = f'{batteryTemlData[-1]}°C'
-        else:
-            batteryLevel, batteryTeml = 0, 0   
-    
+        # Network delta
+        pre_net_path = os.path.join(self.report_dir, scene, "pre_net.json")
+        end_net_path = os.path.join(self.report_dir, scene, "end_net.json")
+        send = recv = 0
+        if os.path.exists(pre_net_path) and os.path.exists(end_net_path):
+            try:
+                with open(pre_net_path) as f:
+                    pre = json.loads(f.read())
+                with open(end_net_path) as f:
+                    end = json.loads(f.read())
+                send = end["send"] - pre["send"]
+                recv = end["recv"] - pre["recv"]
+            except Exception:
+                pass
 
-        totalPassData = self.readLog(scene=scene, filename=f'mem_total.log')[1]
-        
-        if totalPassData.__len__() > 0:
-            swapPassData = self.readLog(scene=scene, filename=f'mem_swap.log')[1]
-            totalPassAvg = f'{round(sum(totalPassData) / len(totalPassData), 2)}MB'
-            swapPassAvg = f'{round(sum(swapPassData) / len(swapPassData), 2)}MB'
-        else:
-            totalPassAvg, swapPassAvg = 0, 0    
+        def avg(data): return round(sum(data) / len(data), 2) if data else 0
 
-        fpsData = self.readLog(scene=scene, filename=f'fps.log')[1]
-        jankData = self.readLog(scene=scene, filename=f'jank.log')[1]
-        if fpsData.__len__() > 0:
-            fpsAvg = f'{int(sum(fpsData) / len(fpsData))}HZ/s'
-            jankAvg = f'{int(sum(jankData))}'
-        else:
-            fpsAvg, jankAvg = 0, 0    
+        return {
+            "app": info.get("app"),
+            "devices": info.get("devices"),
+            "platform": info.get("platform"),
+            "ctime": info.get("ctime"),
+            "cpuAppRate": f"{avg(cpu_app)}%",
+            "cpuSystemRate": f"{avg(cpu_sys)}%",
+            "totalPassAvg": f"{avg(mem_total)}MB",
+            "swapPassAvg": f"{avg(mem_swap)}MB",
+            "fps": f"{int(avg(fps))}HZ/s" if fps else "0HZ/s",
+            "jank": str(int(sum(jank))) if jank else "0",
+            "flow_send": f"{round(send / 1024, 2)}MB",
+            "flow_recv": f"{round(recv / 1024, 2)}MB",
+            "batteryLevel": f"{battery_level[-1] if battery_level else 0}%",
+            "batteryTeml": f"{battery_tem[-1] if battery_tem else 0}°C",
+            "gpu": avg(gpu),
+        }
 
-        if os.path.exists(os.path.join(self.report_dir,scene,'end_net.json')):
-            f_pre = open(os.path.join(self.report_dir,scene,'pre_net.json'))
-            f_end = open(os.path.join(self.report_dir,scene,'end_net.json'))
-            json_pre = json.loads(f_pre.read())
-            json_end = json.loads(f_end.read())
-            send = json_end['send'] - json_pre['send']
-            recv = json_end['recv'] - json_pre['recv']
-        else:
-            send, recv = 0, 0    
-        flowSend = f'{round(float(send / 1024), 2)}MB'
-        flowRecv = f'{round(float(recv / 1024), 2)}MB'
+    def set_ios_perfs(self, scene: str) -> Dict:
+        """Aggregate iOS APM data."""
+        info = self.read_json(scene)
+        cpu_app = self.read_log(scene, "cpu_app.log")[1]
+        mem_total = self.read_log(scene, "mem_total.log")[1]
+        fps = self.read_log(scene, "fps.log")[1]
 
-        gpuData = self.readLog(scene=scene, filename='gpu.log')[1]
-        if gpuData.__len__() > 0:
-            gpu = round(sum(gpuData) / len(gpuData), 2)
-        else:
-            gpu = 0
+        def avg(data): return round(sum(data) / len(data), 2) if data else 0
 
-        mem_detail_flag = os.path.exists(os.path.join(self.report_dir,scene,'mem_java_heap.log'))
-        disk_flag = os.path.exists(os.path.join(self.report_dir,scene,'disk_free.log'))
-        thermal_flag = os.path.exists(os.path.join(self.report_dir,scene,'init_thermal_temp.json'))
-        cpu_core_flag = os.path.exists(os.path.join(self.report_dir,scene,'cpu0.log'))
-        apm_dict = dict()
-        apm_dict['app'] = app
-        apm_dict['devices'] = devices
-        apm_dict['platform'] = platform
-        apm_dict['ctime'] = ctime
-        apm_dict['cpuAppRate'] = cpuAppRate
-        apm_dict['cpuSystemRate'] = cpuSystemRate
-        apm_dict['totalPassAvg'] = totalPassAvg
-        apm_dict['swapPassAvg'] = swapPassAvg
-        apm_dict['fps'] = fpsAvg
-        apm_dict['jank'] = jankAvg
-        apm_dict['flow_send'] = flowSend
-        apm_dict['flow_recv'] = flowRecv
-        apm_dict['batteryLevel'] = batteryLevel
-        apm_dict['batteryTeml'] = batteryTeml
-        apm_dict['mem_detail_flag'] = mem_detail_flag
-        apm_dict['disk_flag'] = disk_flag
-        apm_dict['gpu'] = gpu
-        apm_dict['thermal_flag'] = thermal_flag
-        apm_dict['cpu_core_flag'] = cpu_core_flag
-        
-        if thermal_flag:
-            init_thermal_temp = json.loads(open(os.path.join(self.report_dir,scene,'init_thermal_temp.json')).read())
-            current_thermal_temp = json.loads(open(os.path.join(self.report_dir,scene,'current_thermal_temp.json')).read())
-            apm_dict['init_thermal_temp'] = init_thermal_temp
-            apm_dict['current_thermal_temp'] = current_thermal_temp
+        return {
+            "app": info.get("app"),
+            "devices": info.get("devices"),
+            "platform": info.get("platform"),
+            "ctime": info.get("ctime"),
+            "cpuAppRate": f"{avg(cpu_app)}%",
+            "cpuSystemRate": "0%",
+            "totalPassAvg": f"{avg(mem_total)}MB",
+            "fps": f"{int(avg(fps))}HZ/s" if fps else "0HZ/s",
+            "gpu": 0,
+        }
 
-        return apm_dict
 
-    def _setiOSPerfs(self, scene):
-        """Aggregate APM data for iOS"""
-        
-        app = self.readJson(scene=scene).get('app')
-        devices = self.readJson(scene=scene).get('devices')
-        platform = self.readJson(scene=scene).get('platform')
-        ctime = self.readJson(scene=scene).get('ctime')
+# ─────────────────────────────────────────────────────────────────────────────
+# Devices — improved with subprocess, better error handling
+# ─────────────────────────────────────────────────────────────────────────────
+class Devices:
 
-        cpuAppData = self.readLog(scene=scene, filename=f'cpu_app.log')[1]
-        cpuSystemData = self.readLog(scene=scene, filename=f'cpu_sys.log')[1]
-        if cpuAppData.__len__() > 0 and cpuSystemData.__len__() > 0:
-            cpuAppRate = f'{round(sum(cpuAppData) / len(cpuAppData), 2)}%'
-            cpuSystemRate = f'{round(sum(cpuSystemData) / len(cpuSystemData), 2)}%'
-        else:
-            cpuAppRate, cpuSystemRate = 0, 0
+    def __init__(self, platform: str = Platform.Android.value):
+        self.platform = platform
+        self.adb_path = adb.adb_path
 
-        totalPassData = self.readLog(scene=scene, filename='mem_total.log')[1]
-        if totalPassData.__len__() > 0:
-            totalPassAvg = f'{round(sum(totalPassData) / len(totalPassData), 2)}MB'
-        else:
-            totalPassAvg = 0
-
-        fpsData = self.readLog(scene=scene, filename='fps.log')[1]
-        if fpsData.__len__() > 0:
-            fpsAvg = f'{int(sum(fpsData) / len(fpsData))}HZ/s'
-        else:
-            fpsAvg = 0
-
-        flowSendData = self.readLog(scene=scene, filename='upflow.log')[1]
-        flowRecvData = self.readLog(scene=scene, filename='downflow.log')[1]
-        if flowSendData.__len__() > 0:
-            flowSend = f'{round(float(sum(flowSendData) / 1024), 2)}MB'
-            flowRecv = f'{round(float(sum(flowRecvData) / 1024), 2)}MB'
-        else:
-            flowSend, flowRecv = 0, 0    
-
-        batteryTemlData = self.readLog(scene=scene, filename='battery_tem.log')[1]
-        batteryCurrentData = self.readLog(scene=scene, filename='battery_current.log')[1]
-        batteryVoltageData = self.readLog(scene=scene, filename='battery_voltage.log')[1]
-        batteryPowerData = self.readLog(scene=scene, filename='battery_power.log')[1]
-        if batteryTemlData.__len__() > 0:
-            batteryTeml = int(batteryTemlData[-1])
-            batteryCurrent = int(sum(batteryCurrentData) / len(batteryCurrentData))
-            batteryVoltage = int(sum(batteryVoltageData) / len(batteryVoltageData))
-            batteryPower = int(sum(batteryPowerData) / len(batteryPowerData))
-        else:
-            batteryTeml,  batteryCurrent , batteryVoltage, batteryPower = 0, 0, 0, 0 
-
-        gpuData = self.readLog(scene=scene, filename='gpu.log')[1]
-        if gpuData.__len__() > 0:
-            gpu = round(sum(gpuData) / len(gpuData), 2)
-        else:
-            gpu = 0    
-        disk_flag = os.path.exists(os.path.join(self.report_dir,scene,'disk_free.log'))
-        apm_dict = dict()
-        apm_dict['app'] = app
-        apm_dict['devices'] = devices
-        apm_dict['platform'] = platform
-        apm_dict['ctime'] = ctime
-        apm_dict['cpuAppRate'] = cpuAppRate
-        apm_dict['cpuSystemRate'] = cpuSystemRate
-        apm_dict['totalPassAvg'] = totalPassAvg
-        apm_dict['nativePassAvg'] = 0
-        apm_dict['dalvikPassAvg'] = 0
-        apm_dict['fps'] = fpsAvg
-        apm_dict['jank'] = 0
-        apm_dict['flow_send'] = flowSend
-        apm_dict['flow_recv'] = flowRecv
-        apm_dict['batteryTeml'] = batteryTeml
-        apm_dict['batteryCurrent'] = batteryCurrent
-        apm_dict['batteryVoltage'] = batteryVoltage
-        apm_dict['batteryPower'] = batteryPower
-        apm_dict['gpu'] = gpu
-        apm_dict['disk_flag'] = disk_flag
-        return apm_dict
-
-    def _setpkPerfs(self, scene):
-        """Aggregate APM data for pk model"""
-        cpuAppData1 = self.readLog(scene=scene, filename='cpu_app1.log')[1]
-        cpuAppRate1 = f'{round(sum(cpuAppData1) / len(cpuAppData1), 2)}%'
-        cpuAppData2 = self.readLog(scene=scene, filename='cpu_app2.log')[1]
-        cpuAppRate2 = f'{round(sum(cpuAppData2) / len(cpuAppData2), 2)}%'
-
-        totalPassData1 = self.readLog(scene=scene, filename='mem1.log')[1]
-        totalPassAvg1 = f'{round(sum(totalPassData1) / len(totalPassData1), 2)}MB'
-        totalPassData2 = self.readLog(scene=scene, filename='mem2.log')[1]
-        totalPassAvg2 = f'{round(sum(totalPassData2) / len(totalPassData2), 2)}MB'
-
-        fpsData1 = self.readLog(scene=scene, filename='fps1.log')[1]
-        fpsAvg1 = f'{int(sum(fpsData1) / len(fpsData1))}HZ/s'
-        fpsData2 = self.readLog(scene=scene, filename='fps2.log')[1]
-        fpsAvg2 = f'{int(sum(fpsData2) / len(fpsData2))}HZ/s'
-
-        networkData1 = self.readLog(scene=scene, filename='network1.log')[1]
-        network1 = f'{round(float(sum(networkData1) / 1024), 2)}MB'
-        networkData2 = self.readLog(scene=scene, filename='network2.log')[1]
-        network2 = f'{round(float(sum(networkData2) / 1024), 2)}MB'
-        
-        apm_dict = dict()
-        apm_dict['cpuAppRate1'] = cpuAppRate1
-        apm_dict['cpuAppRate2'] = cpuAppRate2
-        apm_dict['totalPassAvg1'] = totalPassAvg1
-        apm_dict['totalPassAvg2'] = totalPassAvg2
-        apm_dict['network1'] = network1
-        apm_dict['network2'] = network2
-        apm_dict['fpsAvg1'] = fpsAvg1
-        apm_dict['fpsAvg2'] = fpsAvg2
-        return apm_dict
-
-class Method:
-    
-    @classmethod
-    def _request(cls, request, object):
-        match(request.method):
-            case 'POST':
-                return request.form[object]
-            case 'GET':
-                return request.args[object]
-            case _:
-                raise Exception('request method error')
-    
-    @classmethod   
-    def _setValue(cls, value, default = 0):
+    @staticmethod
+    def exec_cmd(cmd: List[str], timeout: int = 15) -> str:
+        """
+        Execute a shell command and return stdout.
+        Replaces os.popen with safer subprocess.run.
+        """
         try:
-            result = value
-        except ZeroDivisionError :
-            result = default
-        except IndexError:
-            result = default        
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+            )
+            return result.stdout.replace("\x1b[0m", "").strip()
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Command timed out: {' '.join(cmd)}")
+            return ""
+        except Exception as e:
+            logger.warning(f"exec_cmd failed: {e}")
+            return ""
+
+    def filter_type(self) -> str:
+        """Return appropriate grep command for the OS."""
+        return "findstr" if platform.system() == Platform.Windows.value else "grep"
+
+    def get_device_ids(self) -> List[str]:
+        """Get all connected device IDs."""
+        output = self.exec_cmd([self.adb_path, "devices"])
+        lines = [l.strip() for l in output.split("\n") if l.strip()]
+        device_ids = []
+        for line in lines[1:]:  # Skip first line (header)
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "device":
+                device_ids.append(parts[0])
+        return device_ids
+
+    def get_devices_name(self, device_id: str) -> str:
+        """Get device model name for a given device ID."""
+        output = adb.shell(f"getprop ro.product.model", deviceId=device_id, timeout=5)
+        return output.strip() or "Unknown"
+
+    def get_devices(self) -> List[str]:
+        """Get list of connected devices with names."""
+        device_ids = self.get_device_ids()
+        devices = [f"{did}({self.get_devices_name(did)})" for did in device_ids]
+        logger.info(f"Connected devices: {devices}")
+        return devices
+
+    def get_id_by_device(self, device_info: str, platform_val: str) -> str:
+        """Extract device ID from device info string."""
+        if platform_val == Platform.Android.value:
+            device_id = re.sub(r"\(.*?\)|\{.*?\}|\[.*?\]", "", device_info).strip()
+            if device_id not in self.get_device_ids():
+                raise Exception("Device not found")
+            return device_id
+        return device_info
+
+    def get_sdk_version(self, device_id: str) -> str:
+        """Get Android SDK version."""
+        return adb.shell("getprop ro.build.version.sdk", deviceId=device_id, timeout=5).strip()
+
+    def get_sdk_version_int(self, device_id: str) -> int:
+        """Get Android SDK version as integer."""
+        try:
+            return int(self.get_sdk_version(device_id))
+        except (ValueError, TypeError):
+            return 0
+
+    def get_android_version_release(self, device_id: str) -> str:
+        """Get Android release version (e.g., '14', '15')."""
+        return adb.shell("getprop ro.build.version.release", deviceId=device_id, timeout=5).strip()
+
+    def is_android_version_above(self, device_id: str, version: int) -> bool:
+        """Check if Android SDK version >= specified version."""
+        return self.get_sdk_version_int(device_id) >= version
+
+    def get_cpu_cores(self, device_id: str) -> int:
+        """Get number of CPU cores on device."""
+        output = adb.shell("cat /sys/devices/system/cpu/online", deviceId=device_id, timeout=5)
+        try:
+            return int(output.split("-")[1]) + 1
+        except (IndexError, ValueError):
+            return 1
+
+    def get_pid(self, device_id: str, pkg_name: str) -> List[str]:
+        """
+        Get PIDs for a package name on Android.
+        Returns list of '{pid}:{packagename}' strings.
+        """
+        try:
+            sdk_version = self.get_sdk_version(device_id)
+            sdk_int = int(sdk_version) if sdk_version else 0
+            ft = self.filter_type()
+
+            if sdk_int < 26:
+                # Older ps format: PID PPID NAME
+                output = self.exec_cmd(
+                    [self.adb_path, "-s", device_id, "shell", f"ps | {ft}", pkg_name]
+                )
+                lines = [l for l in output.split("\n") if pkg_name in l]
+                process_list = []
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) >= 9:
+                        process_list.append(f"{parts[1]}:{parts[-1]}")
+            else:
+                # Newer ps -ef format: UID PID PPID NAME
+                output = self.exec_cmd(
+                    [self.adb_path, "-s", device_id, "shell", f"ps -ef | {ft}", pkg_name]
+                )
+                lines = [l for l in output.split("\n") if pkg_name in l]
+                process_list = []
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) >= 8:
+                        process_list.append(f"{parts[1]}:{parts[-1]}")
+
+            # Move exact match to front if found
+            for i, p in enumerate(process_list):
+                parts = p.split(":")
+                if len(parts) == 2 and parts[1] == pkg_name:
+                    process_list.insert(0, process_list.pop(i))
+                    break
+
+            if not process_list:
+                logger.warning(f"No PID found for {pkg_name}")
+        except Exception as e:
+            process_list = []
+            logger.exception(e)
+        return process_list
+
+    def check_pkgname(self, pkgname: str) -> bool:
+        """Check if package name passes validation."""
+        blocked_prefixes = ["com.google"]
+        return not any(pkgname.startswith(p) for p in blocked_prefixes)
+
+    def get_pkg_names(self, device_id: str) -> List[str]:
+        """Get all package names on Android device."""
+        output = self.exec_cmd(
+            [self.adb_path, "-s", device_id, "shell", "pm list packages --user 0"]
+        )
+        pkglist = [p.lstrip("package:").strip() for p in output.split("\n") if p.startswith("package:")]
+        if not pkglist:
+            output = self.exec_cmd(
+                [self.adb_path, "-s", device_id, "shell", "pm list packages"]
+            )
+            pkglist = [p.lstrip("package:").strip() for p in output.split("\n") if p.startswith("package:")]
+        return pkglist
+
+    def get_device_info_by_ios(self) -> List[str]:
+        """Get list of connected iOS device UDIDs."""
+        try:
+            udids = Usbmux().device_udid_list()
+            logger.info(f"Connected iOS devices: {udids}")
+            return udids
+        except Exception as e:
+            logger.warning(f"Failed to get iOS devices: {e}")
+            return []
+
+    def get_pkg_names_by_ios(self, udid: str) -> List[str]:
+        """Get installed package names on iOS device."""
+        try:
+            device = Device(udid)
+            return [i.get("CFBundleIdentifier") for i in device.installation.iter_installed(app_type="User")]
+        except Exception as e:
+            logger.warning(f"Failed to get iOS packages: {e}")
+            return []
+
+    def get_pc_ip(self) -> str:
+        """Get local PC IP address."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(3)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
         except Exception:
-            result = default            
+            logger.error("Failed to get local IP")
+            return "127.0.0.1"
+
+    def get_device_ip(self, device_id: str) -> Optional[str]:
+        """Get device WiFi IP address."""
+        output = self.exec_cmd([self.adb_path, "-s", device_id, "shell", "ip addr show wlan0"])
+        match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", output)
+        return match.group(1) if match else None
+
+    def devices_check(self, platform_val: str, deviceid: str = None, pkgname: str = None):
+        """Validate device environment is ready."""
+        if platform_val == Platform.Android.value:
+            if not self.get_device_ids():
+                raise Exception("No Android devices found")
+            if deviceid and pkgname and not self.get_pid(deviceid, pkgname):
+                raise Exception(f"No process found for {pkgname}")
+        elif platform_val == Platform.iOS.value:
+            if not self.get_device_info_by_ios():
+                raise Exception("No iOS devices found")
+        else:
+            raise Exception("Platform must be Android or iOS")
+
+    def get_device_detail(self, device_id: str, platform_val: str) -> Dict:
+        """Get detailed device information."""
+        result = {}
+        if platform_val == Platform.Android.value:
+            props = adb.get_props(
+                [
+                    "ro.product.brand",
+                    "ro.product.model",
+                    "ro.build.version.release",
+                    "ro.serialno",
+                ],
+                device_id,
+            )
+            result = {
+                "brand": props.get("ro.product.brand", "").strip(),
+                "name": props.get("ro.product.model", "").strip(),
+                "version": props.get("ro.build.version.release", "").strip(),
+                "serialno": props.get("ro.serialno", "").strip(),
+                "cpu_cores": self.get_cpu_cores(device_id),
+                "physical_size": adb.shell("wm size", deviceId=device_id, timeout=5)
+                .replace("Physical size:", "")
+                .strip(),
+            }
+            # WiFi MAC
+            mac_output = adb.shell(
+                f"ip addr show wlan0 | {self.filter_type()} link/ether", deviceId=device_id, timeout=5
+            )
+            result["wifiadr"] = mac_output.split()[1] if len(mac_output.split()) > 1 else ""
+        elif platform_val == Platform.iOS.value:
+            ios_dev = Device(udid=device_id)
+            result = {
+                "brand": ios_dev.get_value("DeviceClass", no_session=True) or "",
+                "name": ios_dev.get_value("DeviceName", no_session=True) or "",
+                "version": ios_dev.get_value("ProductVersion", no_session=True) or "",
+                "serialno": device_id,
+                "wifiadr": ios_dev.get_value("WiFiAddress", no_session=True) or "",
+                "cpu_cores": 0,
+                "physical_size": self._get_ios_screen_size(device_id),
+            }
+        else:
+            raise Exception(f"Undefined platform: {platform_val}")
         return result
-    
+
+    def _get_ios_screen_size(self, device_id: str) -> str:
+        """Get iOS device screen size."""
+        try:
+            ios_dev = Device(udid=device_id)
+            info = ios_dev.screen_info()
+            return f"{info.get('width', 0)}x{info.get('height', 0)}"
+        except Exception as e:
+            logger.warning(f"Failed to get iOS screen size: {e}")
+            return ""
+
+    def get_current_activity(self, device_id: str) -> str:
+        """Get current foreground activity name."""
+        ft = self.filter_type()
+        result = adb.shell(f"dumpsys window | {ft} mCurrentFocus", deviceId=device_id, timeout=5)
+        if "mCurrentFocus" in result:
+            return result.split(" ")[-1].replace("}", "").strip()
+        raise Exception("No current activity found")
+
+    def get_startup_time_by_android(self, activity: str, device_id: str) -> str:
+        """Measure app startup time."""
+        return adb.shell(f"am start -W {activity}", deviceId=device_id, timeout=15)
+
+    def get_startup_time_by_ios(self, pkg_name: str) -> str:
+        """Measure iOS app startup time."""
+        try:
+            import pyidevice
+        except ImportError:
+            logger.error("py-ios-devices not found. Install with: pip install py-ios-devices")
+            return ""
+        result = self.exec_cmd(f"pyidevice instruments app_lifecycle -b {pkg_name}".split())
+        return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Method — HTTP request helpers
+# ─────────────────────────────────────────────────────────────────────────────
+class Method:
+
     @classmethod
-    def _settings(cls, request):
-        content = {}
-        content['cpuWarning'] = (0, request.cookies.get('cpuWarning'))[request.cookies.get('cpuWarning') not in [None, 'NaN']]
-        content['memWarning'] = (0, request.cookies.get('memWarning'))[request.cookies.get('memWarning') not in [None, 'NaN']]
-        content['fpsWarning'] = (0, request.cookies.get('fpsWarning'))[request.cookies.get('fpsWarning') not in [None, 'NaN']]
-        content['netdataRecvWarning'] = (0, request.cookies.get('netdataRecvWarning'))[request.cookies.get('netdataRecvWarning') not in [None, 'NaN']]
-        content['netdataSendWarning'] = (0, request.cookies.get('netdataSendWarning'))[request.cookies.get('netdataSendWarning') not in [None, 'NaN']]
-        content['betteryWarning'] = (0, request.cookies.get('betteryWarning'))[request.cookies.get('betteryWarning') not in [None, 'NaN']]
-        content['gpuWarning'] = (0, request.cookies.get('gpuWarning'))[request.cookies.get('gpuWarning') not in [None, 'NaN']]
-        content['duration'] = (0, request.cookies.get('duration'))[request.cookies.get('duration') not in [None, 'NaN']]
-        content['solox_host'] = ('', request.cookies.get('solox_host'))[request.cookies.get('solox_host') not in [None, 'NaN']]
-        content['host_switch'] = request.cookies.get('host_switch')
-        return content
-    
+    def _request(cls, request, key: str) -> Any:
+        """Extract value from Flask request (form or query args)."""
+        if request.method == "POST":
+            return request.form.get(key, "")
+        if request.method == "GET":
+            return request.args.get(key, "")
+        raise Exception("Unsupported HTTP method")
+
     @classmethod
-    def _index(cls, target: list, index: int, default: any):
+    def _set_value(cls, value: Any, default: Any = 0) -> Any:
+        """Safe numeric conversion with default on error."""
+        try:
+            return float(value)
+        except (ZeroDivisionError, ValueError, TypeError):
+            return default
+
+    @classmethod
+    def _index(cls, target: List, index: int, default: Any = None) -> Any:
+        """Safe list index access."""
         try:
             return target[index]
         except IndexError:
             return default
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Install — APK/IPA installation utilities
+# ─────────────────────────────────────────────────────────────────────────────
 class Install:
 
-    def uploadFile(self, file_path, file_obj):
-        """save upload file"""
+    def upload_file(self, file_path: str, file_obj):
+        """Save uploaded file."""
         try:
             file_obj.save(file_path)
             return True
         except Exception as e:
             logger.exception(e)
-            return False            
+            return False
 
-    def downloadLink(self,filelink=None, path=None, name=None):
+    def download_link(self, file_link: str = None, path: str = None, name: str = None) -> bool:
+        """Download file with progress bar."""
         try:
-            logger.info('Install link : {}'.format(filelink))
-            ssl._create_default_https_context = ssl._create_unverified_context
-            file_size = int(urlopen(filelink).info().get('Content-Length', -1))
-            header = {"Range": "bytes=%s-%s" % (0, file_size)}
-            pbar = tqdm(
-                total=file_size, initial=0,
-                unit='B', unit_scale=True, desc=filelink.split('/')[-1])
-            req = requests.get(filelink, headers=header, stream=True)
-            with(open(os.path.join(path, name), 'ab')) as f:
-                for chunk in req.iter_content(chunk_size=1024):
+            logger.info(f"Downloading: {file_link}")
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            response = requests.get(file_link, stream=True, timeout=30)
+            response.raise_for_status()
+            total_size = int(response.headers.get("Content-Length", 0))
+            pbar = tqdm(total=total_size, unit="B", unit_scale=True, desc=name or file_link.split("/")[-1])
+            with open(os.path.join(path, name), "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
-                         f.write(chunk)
-                         pbar.update(1024)
+                        f.write(chunk)
+                        pbar.update(len(chunk))
             pbar.close()
             return True
         except Exception as e:
             logger.exception(e)
             return False
 
-    def installAPK(self, path):
-        result = adb.shell_noDevice(cmd='install -r {}'.format(path))
-        if result == 0:
+    def install_apk(self, path: str) -> Tuple[bool, int]:
+        """Install APK via ADB."""
+        result = adb.shell_no_device(cmd=f"install -r {path}")
+        if result == 0 and os.path.exists(path):
             os.remove(path)
-            return True, result
-        else:
-            return False, result
+        return result == 0, result
 
-    def installIPA(self, path):
-        result = os.system('tidevice install {}'.format(path))
-        if result == 0:
-            os.remove(path)
-            return True, result
-        else:
-            return False, result
+    def install_ipa(self, path: str) -> Tuple[bool, int]:
+        """Install IPA via tidevice."""
+        try:
+            result = subprocess.run(
+                ["tidevice", "install", path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+            if result.returncode == 0 and os.path.exists(path):
+                os.remove(path)
+            return result.returncode == 0, result.returncode
+        except subprocess.TimeoutExpired:
+            return False, -1
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scrcpy — screen mirroring/recording
+# ─────────────────────────────────────────────────────────────────────────────
 class Scrcpy:
 
     STATICPATH = os.path.dirname(os.path.realpath(__file__))
     DEFAULT_SCRCPY_PATH = {
         "64": os.path.join(STATICPATH, "scrcpy", "scrcpy-win64-v2.4", "scrcpy.exe"),
         "32": os.path.join(STATICPATH, "scrcpy", "scrcpy-win32-v2.4", "scrcpy.exe"),
-        "default":"scrcpy"
+        "default": "scrcpy",
     }
-    
+
     @classmethod
-    def scrcpy_path(cls):
-        bit = platform.architecture()[0]
-        path = cls.DEFAULT_SCRCPY_PATH["default"]
-        if platform.system().lower().__contains__('windows'):
-            if bit.__contains__('64'):
-                path =  cls.DEFAULT_SCRCPY_PATH["64"]
-            elif bit.__contains__('32'):
-                path =  cls.DEFAULT_SCRCPY_PATH["32"]
-        return path
-    
+    def _scrcpy_path(cls) -> str:
+        """Get platform-appropriate scrcpy path."""
+        if platform.system() == Platform.Windows.value:
+            bit = platform.architecture()[0]
+            if "64" in bit:
+                return cls.DEFAULT_SCRCPY_PATH["64"]
+            return cls.DEFAULT_SCRCPY_PATH["32"]
+        return cls.DEFAULT_SCRCPY_PATH["default"]
+
     @classmethod
-    def start_record(cls, device):
+    def start_record(cls, device: str) -> int:
+        """Start screen recording via scrcpy."""
+        logger.info("Starting screen recording")
         f = File()
-        logger.info('start record screen')
-        win_cmd = "start /b {scrcpy_path} -s {deviceId} --no-playback --record={video}".format(
-            scrcpy_path = cls.scrcpy_path(), 
-            deviceId = device, 
-            video = os.path.join(f.report_dir, 'record.mkv')
-        )
-        mac_cmd = "nohup {scrcpy_path} -s {deviceId} --no-playback --record={video} &".format(
-            scrcpy_path = cls.scrcpy_path(), 
-            deviceId = device, 
-            video = os.path.join(f.report_dir, 'record.mkv')
-        )
-        if platform.system().lower().__contains__('windows'):
-            result = os.system(win_cmd)
+        video_path = os.path.join(f.report_dir, "record.mkv")
+        scrcpy_path = cls._scrcpy_path()
+        record_cmd = f'{scrcpy_path} -s {device} --no-playback --record={video_path}'
+
+        if platform.system() == Platform.Windows.value:
+            result = subprocess.run(f"start /b {record_cmd}", shell=True)
         else:
-            result = os.system(mac_cmd)    
-        if result == 0:
-            logger.info("record screen success : {}".format(os.path.join(f.report_dir, 'record.mkv')))
+            result = subprocess.run(f"nohup {record_cmd} &", shell=True)
+
+        if result.returncode == 0:
+            logger.info(f"Screen recording started: {video_path}")
         else:
-            logger.error("solox's scrcpy is incompatible with your PC")
-            logger.info("Please install the software yourself : brew install scrcpy")    
-        return result
-    
+            logger.error("scrcpy not compatible. Install: brew install scrcpy (macOS) or choco install scrcpy (Windows)")
+        return result.returncode
+
     @classmethod
     def stop_record(cls):
-        logger.info('stop scrcpy process')
-        pids = psutil.pids()
-        try:
-            for pid in pids:
-                p = psutil.Process(pid)
-                if p.name().__contains__('scrcpy'):
-                    os.kill(pid, signal.SIGABRT)
-                    logger.info(pid)
-        except Exception as e:
-            logger.exception(e)
-    
+        """Stop scrcpy recording process."""
+        logger.info("Stopping scrcpy recording")
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                cmdline = proc.info.get("cmdline") or []
+                if any("scrcpy" in str(c).lower() for c in cmdline):
+                    proc.send_signal(signal.SIGABRT)
+                    logger.info(f"Stopped scrcpy PID: {proc.pid}")
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
     @classmethod
-    def cast_screen(cls, device):
-        logger.info('start cast screen')
-        win_cmd = "start /i {scrcpy_path} -s {deviceId} --stay-awake".format(
-            scrcpy_path = cls.scrcpy_path(), 
-            deviceId = device
-        )
-        mac_cmd = "nohup {scrcpy_path} -s {deviceId} --stay-awake &".format(
-            scrcpy_path = cls.scrcpy_path(), 
-            deviceId = device
-        )
-        if platform.system().lower().__contains__('windows'):
-            result = os.system(win_cmd)
+    def cast_screen(cls, device: str) -> int:
+        """Start screen casting via scrcpy."""
+        logger.info("Starting screen cast")
+        scrcpy_path = cls._scrcpy_path()
+        cast_cmd = f'{scrcpy_path} -s {device} --stay-awake'
+
+        if platform.system() == Platform.Windows.value:
+            result = subprocess.run(f"start /i {cast_cmd}", shell=True)
         else:
-            result = os.system(mac_cmd)
-        if result == 0:
-            logger.info("cast screen success")
+            result = subprocess.run(f"nohup {cast_cmd} &", shell=True)
+
+        if result.returncode == 0:
+            logger.info("Screen cast started")
         else:
-            logger.error("solox's scrcpy is incompatible with your PC")
-            logger.info("Please install the software yourself : brew install scrcpy")    
-        return result
-    
+            logger.error("scrcpy not compatible. Install: brew install scrcpy")
+        return result.returncode
+
     @classmethod
-    def play_video(cls, video):
-        logger.info('start play video : {}'.format(video))
+    def play_video(cls, video: str):
+        """Play back recorded video."""
+        logger.info(f"Playing video: {video}")
         cap = cv2.VideoCapture(video)
-        while(cap.isOpened()):
+        if not cap.isOpened():
+            logger.error(f"Cannot open video: {video}")
+            return
+        cv2.namedWindow("frame", 0)
+        cv2.resizeWindow("frame", 430, 900)
+        while True:
             ret, frame = cap.read()
-            if ret:
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                cv2.namedWindow("frame", 0)  
-                cv2.resizeWindow("frame", 430, 900)
-                cv2.imshow('frame', gray)
-                if cv2.waitKey(25) & 0xFF == ord('q') or not cv2.getWindowProperty("frame", cv2.WND_PROP_VISIBLE):
-                    break
-            else:
+            if not ret:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            cv2.imshow("frame", gray)
+            if cv2.waitKey(25) & 0xFF == ord("q"):
                 break
         cap.release()
         cv2.destroyAllWindows()

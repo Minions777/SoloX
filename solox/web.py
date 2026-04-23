@@ -1,14 +1,15 @@
 from __future__ import absolute_import
 import multiprocessing
+import os
 import subprocess
 import time
-import os
 import platform
 import re
 import webbrowser
 import requests
 import socket
 import sys
+import secrets
 import psutil
 from logzero import logger
 from threading import Lock
@@ -23,7 +24,16 @@ app = Flask(__name__, template_folder='templates', static_folder='static')
 app.register_blueprint(api)
 app.register_blueprint(page)
 
-socketio = SocketIO(app, cors_allowed_origins="*")
+# Security: generate a random secret key if not set
+app.config.setdefault('SECRET_KEY', os.environ.get('SOLOX_SECRET_KEY', secrets.token_hex(32)))
+
+# Security: restrict CORS to configured origins (default: same-origin)
+_allowed_origins = os.environ.get('SOLOX_CORS_ORIGINS', '')
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=_allowed_origins.split(',') if _allowed_origins else [],
+    cors_allowed_origins_regex=None,
+)
 thread = True
 thread_lock = Lock()
 
@@ -112,10 +122,16 @@ def start(host: str, port: int):
 def main(host=ip(), port=50003):
     try:
         pool = multiprocessing.Pool(processes=2)
-        pool.apply_async(start, (host, port))
-        pool.apply_async(open_url, (host, port))
-        pool.close()
-        pool.join()
+        try:
+            pool.apply_async(start, (host, port))
+            pool.apply_async(open_url, (host, port))
+            pool.close()
+            pool.join()
+        except Exception as e:
+            logger.exception(e)
+            pool.terminate()
+            pool.join()
+            sys.exit(1)
     except KeyboardInterrupt:
         logger.info('stop solox success')
         sys.exit()
