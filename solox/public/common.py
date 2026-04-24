@@ -488,6 +488,22 @@ class Devices:
                 device_ids.append(parts[0])
         return device_ids
 
+    # Backward-compatible public aliases (legacy camelCase API)
+    def getDeviceIds(self) -> List[str]:
+        return self.get_device_ids()
+
+    def filterType(self) -> str:
+        return self.filter_type()
+
+    def getIdbyDevice(self, device: str, platform: str) -> str:
+        return self.get_id_by_device(device, platform)
+
+    def getPkgname(self, deviceId: str) -> List[str]:
+        return self.get_pkg_names(deviceId)
+
+    def getPkgnameByiOS(self, udid: str) -> List[str]:
+        return self.get_pkg_names_by_ios(udid)
+
     def get_devices_name(self, device_id: str) -> str:
         """Get device model name for a given device ID."""
         output = adb.shell(f"getprop ro.product.model", deviceId=device_id, timeout=5)
@@ -582,6 +598,14 @@ class Devices:
             process_list = []
             logger.exception(e)
         return process_list
+
+    def getPid(self, deviceId: str = None, pkgName: str = None, **kwargs) -> List[str]:
+        """Backward-compatible wrapper for legacy kwargs/callers."""
+        device_id = deviceId or kwargs.get("device_id")
+        pkg_name = pkgName or kwargs.get("pkg_name")
+        if device_id is None or pkg_name is None:
+            raise ValueError("deviceId and pkgName are required")
+        return self.get_pid(device_id, pkg_name)
 
     def check_pkgname(self, pkgname: str) -> bool:
         """Check if package name passes validation."""
@@ -816,6 +840,16 @@ class Install:
             return result.returncode == 0, result.returncode
         except subprocess.TimeoutExpired:
             return False, -1
+
+    # Backward-compatible public aliases (legacy camelCase API)
+    def downloadLink(self, filelink: str = None, path: str = None, name: str = None) -> bool:
+        return self.download_link(file_link=filelink, path=path, name=name)
+
+    def installAPK(self, path: str) -> Tuple[bool, int]:
+        return self.install_apk(path)
+
+    def installIPA(self, path: str) -> Tuple[bool, int]:
+        return self.install_ipa(path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
